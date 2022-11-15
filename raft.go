@@ -14,7 +14,7 @@ import (
 )
 
 type Log struct {
-	Command interface{}
+	Command string
 	Term    int32
 }
 
@@ -61,6 +61,8 @@ func NewRaft() *Raft {
 				Port: "8003",
 			},
 		},
+		voteGrantedChan:          make(chan *api.VoteRequest),
+		appendEntriesSuccessChan: make(chan *api.AppendEntriesRequest),
 	}
 	state := newFollower(raft)
 	raft.ChangeState(state)
@@ -91,6 +93,9 @@ type Raft struct {
 	servers []ServerAddr
 
 	electionTimeout time.Duration
+
+	voteGrantedChan          chan *api.VoteRequest
+	appendEntriesSuccessChan chan *api.AppendEntriesRequest
 }
 
 func (r *Raft) Run() {
@@ -119,36 +124,31 @@ func (r *Raft) Run() {
 }
 
 func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.VoteResponse, error) {
-
 	log.Debug().
-		Int32("term", req.Term).
-		Str("candidate_id", req.CandidateId).
-		Int32("last_log_idx", req.LastLogIdx).
-		Int32("last_log_term", req.LastLogTerm).
+		Int32("cTerm", req.Term).
+		Str("cId", req.CandidateId).
+		Int32("clastLastLogIdx", req.LastLogIdx).
+		Int32("cLastLogTerm", req.LastLogTerm).
+		Str("srvVotedFor", r.votedFor).
 		Msgf("vote request is received")
 
-	// implementation 1
-	if req.Term < r.currentTerm {
-		return &api.VoteResponse{
-			Term:        r.currentTerm,
-			VoteGranted: false,
-		}, nil
+	if r.currentTerm <= req.Term {
+		// TODO(imre) possibility of race condition due to votedFor
+		// is being used on the select case
+		if r.votedFor == "" || r.votedFor == req.CandidateId {
+			receiverLastLogIdx := int32(len(r.logs))
+			if receiverLastLogIdx == 0 && req.LastLogIdx >= 0 || receiverLastLogIdx <= req.LastLogIdx {
+				log.Info().Msg("vote is granted")
+				r.voteGrantedChan <- req
+				return &api.VoteResponse{
+					Term:        r.currentTerm,
+					VoteGranted: true,
+				}, nil
+			}
+		}
 	}
 
-	// implementation 2
-	if r.votedFor == "" || r.votedFor == req.CandidateId {
-		log.Debug().Msgf("entering the second rule")
-		// if (len(f.logs) == 0 && f.currentTerm < r.LastLogTerm) ||
-		// 	(f.logs[len(f.logs)-1].Term <= r.LastLogTerm && int32(len(f.logs)) <= r.LastLogIdx) {
-		// if len(r.logs) == 0 && r.currentTerm < req.LastLogTerm {
-		r.votedFor = req.CandidateId
-		return &api.VoteResponse{
-			Term:        r.currentTerm,
-			VoteGranted: true,
-		}, nil
-		// }
-	}
-
+	log.Debug().Msg("vote is not granted. candidate doesn't satisfy any requirements to become leader")
 	return &api.VoteResponse{
 		Term:        r.currentTerm,
 		VoteGranted: false,
@@ -164,8 +164,7 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 		}, nil
 	}
 
-	// TODO change this
-	r.state.AppendEntries(ctx, req)
+	r.appendEntriesSuccessChan <- req
 
 	return &api.AppendEntriesResponse{
 		Term:    r.currentTerm,
@@ -175,7 +174,6 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 
 type state interface {
 	Run()
-	AppendEntries(context.Context, *api.AppendEntriesRequest) (*api.AppendEntriesResponse, error)
 }
 
 func (r *Raft) ChangeState(state state) {

@@ -1,28 +1,22 @@
 package raft
 
 import (
-	"context"
 	"math/rand"
 	"time"
 
-	"github.com/imrenagi/raft/api"
 	"github.com/rs/zerolog/log"
 )
 
 func newFollower(r *Raft) *follower {
-	r.votedFor = ""
+	r.votedFor = "" // remove votedFor when it becomes follower again
 	rand.Seed(time.Now().UnixNano())
 	return &follower{
-		Raft:              r,
-		voteRequestChan:   make(chan *api.VoteRequest, len(r.servers)),
-		appendEntriesChan: make(chan *api.AppendEntriesRequest),
+		Raft: r,
 	}
 }
 
 type follower struct {
 	*Raft
-	voteRequestChan   chan *api.VoteRequest
-	appendEntriesChan chan *api.AppendEntriesRequest
 }
 
 func (f *follower) Run() {
@@ -35,13 +29,15 @@ func (f *follower) Run() {
 			log.Debug().Msg("election timeout")
 			f.ChangeState(newCandidate(f.Raft))
 			return
-		case <-f.appendEntriesChan:
-			log.Debug().Msgf("follower is receiving append entries")
+		case voteReq, ok := <-f.voteGrantedChan:
+			if ok {
+				f.votedFor = voteReq.CandidateId
+				f.currentTerm = voteReq.Term
+			}
+		case <-f.appendEntriesSuccessChan:
+			log.Debug().
+				Int32("currentTerm", f.currentTerm).
+				Msgf("follower is receiving append entries")
 		}
 	}
-}
-
-func (f follower) AppendEntries(ctx context.Context, r *api.AppendEntriesRequest) (*api.AppendEntriesResponse, error) {
-	f.appendEntriesChan <- r
-	return nil, nil
 }

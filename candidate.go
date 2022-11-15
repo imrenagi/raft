@@ -1,7 +1,6 @@
 package raft
 
 import (
-	"context"
 	"time"
 
 	"github.com/imrenagi/raft/api"
@@ -22,10 +21,6 @@ func newCandidate(r *Raft) *candidate {
 type candidate struct {
 	*Raft
 	totalVotes int
-
-	// electedLeaderChan is used to notify the candidate to change its state to follower
-	// because new leader is elected
-	electedLeaderChan chan struct{}
 }
 
 func (c *candidate) Run() {
@@ -79,21 +74,19 @@ func (c *candidate) Run() {
 				c.ChangeState(newLeader(c.Raft))
 				return
 			}
-		case <-c.electedLeaderChan:
-			log.Debug().Msg("changing state to follower")
-			c.ChangeState(newFollower(c.Raft))
-			return
+		case voteReq, ok := <-c.voteGrantedChan: // TODO(imre) seems duplicated with follower code
+			if ok {
+				c.votedFor = voteReq.CandidateId
+				c.currentTerm = voteReq.Term
+			}
+		case _, ok := <-c.appendEntriesSuccessChan:
+			if ok {
+				c.ChangeState(newFollower(c.Raft))
+			}
 		case <-time.After(c.electionTimeout):
 			log.Debug().Msg("voting timeout")
 			c.ChangeState(newFollower(c.Raft))
 			return
 		}
 	}
-}
-
-func (c *candidate) AppendEntries(context.Context, *api.AppendEntriesRequest) (*api.AppendEntriesResponse, error) {
-
-	c.ChangeState(newFollower(c.Raft))
-	// TODO after changing state append entries need to append log as well.
-	return nil, nil
 }

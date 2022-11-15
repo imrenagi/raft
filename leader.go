@@ -1,7 +1,6 @@
 package raft
 
 import (
-	"context"
 	"time"
 
 	"github.com/imrenagi/raft/api"
@@ -22,6 +21,8 @@ func (l *leader) Run() {
 
 	log.Info().Msg("running as leader")
 
+	// TODO(imre) should send AppendEntriesRPC upon being elected.
+	// it should not wait for the ticker
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -46,6 +47,7 @@ func (l *leader) Run() {
 						}
 
 						log.Debug().
+							Int32("currentTerm", l.currentTerm).
 							Bool("success", res.Success).
 							Msg("append entries is completed")
 					}
@@ -53,10 +55,4 @@ func (l *leader) Run() {
 			}
 		}
 	}
-
-}
-
-func (l *leader) AppendEntries(context.Context, *api.AppendEntriesRequest) (*api.AppendEntriesResponse, error) {
-	// if entries added by valid leader, push data to electedLeaderChan
-	return nil, nil
 }
