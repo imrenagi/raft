@@ -137,14 +137,16 @@ func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.Vote
 		// is being used on the select case
 		if r.votedFor == "" || r.votedFor == req.CandidateId {
 			receiverLastLogIdx := int32(len(r.logs))
-			if receiverLastLogIdx == 0 && req.LastLogIdx >= 0 || receiverLastLogIdx <= req.LastLogIdx {
-				log.Info().Msg("vote is granted")
+			if req.Term > r.currentTerm || // if candidate's term is the later
+				(req.Term == r.currentTerm && receiverLastLogIdx <= req.LastLogIdx) { // if logs end up with the same term, then whichever has the longer
+				log.Debug().Msg("granting vote")
 				r.voteGrantedChan <- req
 				return &api.VoteResponse{
 					Term:        r.currentTerm,
 					VoteGranted: true,
 				}, nil
 			}
+
 		}
 	}
 
