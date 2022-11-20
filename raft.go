@@ -140,21 +140,47 @@ func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.Vote
 		Str("srvVotedFor", r.votedFor).
 		Msgf("vote request is received")
 
-	if r.currentTerm <= req.Term {
-		// TODO(imre) possibility of race condition due to votedFor
-		// is being used on the select case
-		if r.votedFor == "" || r.votedFor == req.CandidateId {
-			receiverLastLogIdx := int32(len(r.logs))
-			if req.Term > r.currentTerm || // if candidate's term is the later
-				(req.Term == r.currentTerm && receiverLastLogIdx <= req.LastLogIdx) { // if logs end up with the same term, then whichever has the longer
-				log.Debug().Msg("granting vote")
-				r.voteGrantedChan <- req
-				return &api.VoteResponse{
-					Term:        r.currentTerm,
-					VoteGranted: true,
-				}, nil
-			}
+	if r.currentTerm > req.Term {
+		log.Debug().Msg("candidate is left behind")
+		return &api.VoteResponse{
+			Term:        r.currentTerm,
+			VoteGranted: false,
+		}, nil
+	}
+
+	if r.currentTerm == req.Term && r.votedFor != "" && r.votedFor != req.CandidateId {
+		log.Debug().Msg("vote for current term has been given to other candidate")
+		return &api.VoteResponse{
+			Term:        r.currentTerm,
+			VoteGranted: false,
+		}, nil
+	}
+
+	receiverLastLogIdx := int32(len(r.logs))
+	receiverLastLogTerm := int32(0)
+
+	if receiverLastLogIdx != 0 {
+		receiverLastLogTerm = r.logs[receiverLastLogIdx-1].Term
+	}
+
+	if receiverLastLogTerm == req.LastLogTerm {
+		if req.LastLogIdx >= receiverLastLogIdx {
+			log.Debug().Msg("candidate term is same and its log is longer or equal with receiver log")
+			r.voteGrantedChan <- req
+			return &api.VoteResponse{
+				Term:        r.currentTerm,
+				VoteGranted: true,
+			}, nil
 		}
+	}
+
+	if req.LastLogTerm > receiverLastLogTerm {
+		log.Debug().Msg("candidate term is more up to date than the receiver term")
+		r.voteGrantedChan <- req
+		return &api.VoteResponse{
+			Term:        r.currentTerm,
+			VoteGranted: true,
+		}, nil
 	}
 
 	log.Debug().Msg("vote is not granted. candidate doesn't satisfy any requirements to become leader")
@@ -188,6 +214,7 @@ type state interface {
 }
 
 func (r *Raft) changeState(state state) error {
+	log.Info().Msgf("role transition into %s", state)
 	r.state = state
 
 	if err := r.saveState(); err != nil {
