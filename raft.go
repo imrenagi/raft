@@ -55,16 +55,16 @@ func NewRaft() *Raft {
 				Host: "127.0.0.1",
 				Port: "8001",
 			},
-			// {
-			// 	ID:   "2",
-			// 	Host: "127.0.0.1",
-			// 	Port: "8002",
-			// },
-			// {
-			// 	ID:   "3",
-			// 	Host: "127.0.0.1",
-			// 	Port: "8003",
-			// },
+			{
+				ID:   "2",
+				Host: "127.0.0.1",
+				Port: "8002",
+			},
+			{
+				ID:   "3",
+				Host: "127.0.0.1",
+				Port: "8003",
+			},
 		},
 		voteGrantedChan:          make(chan *api.VoteRequest),
 		appendEntriesSuccessChan: make(chan *api.AppendEntriesRequest),
@@ -187,8 +187,23 @@ type state interface {
 	Run()
 }
 
-func (r *Raft) ChangeState(state state) {
+func (r *Raft) changeState(state state) error {
 	r.state = state
+
+	if err := r.saveState(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Raft) voteGranted(toCandidate string, forTerm int32) error {
+	r.votedFor = toCandidate
+	r.currentTerm = forTerm
+
+	if err := r.saveState(); err != nil {
+		return err
+	}
+	return nil
 }
 
 type stateConf struct {
@@ -240,12 +255,18 @@ func (r *Raft) readState(opts ...stateOption) error {
 	default:
 		raftRole = newFollower(r)
 	}
-	r.ChangeState(raftRole)
+	r.changeState(raftRole)
+
+	log.Debug().
+		Str("votedFor", r.votedFor).
+		Int32("currentTerm", r.currentTerm).
+		Str("role", r.state.String()).
+		Msg("successfully read config file")
 
 	return nil
 }
 
-func (r Raft) SaveState(opts ...stateOption) error {
+func (r Raft) saveState(opts ...stateOption) error {
 	options := &stateOptions{
 		fileName: fmt.Sprintf(stateFileFmt, r.id),
 	}
@@ -253,7 +274,7 @@ func (r Raft) SaveState(opts ...stateOption) error {
 		o(options)
 	}
 
-	f, err := os.OpenFile(options.fileName, os.O_RDWR|os.O_CREATE, 0755)
+	f, err := os.OpenFile(options.fileName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
 	if err != nil {
 		return err
 	}
@@ -261,12 +282,11 @@ func (r Raft) SaveState(opts ...stateOption) error {
 
 	encoder := yaml.NewEncoder(f)
 	defer encoder.Close()
-	err = encoder.Encode(&stateConf{
+	if err = encoder.Encode(&stateConf{
 		Term:     r.currentTerm,
 		VotedFor: r.votedFor,
 		Role:     r.state.String(),
-	})
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 

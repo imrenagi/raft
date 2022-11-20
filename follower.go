@@ -8,7 +8,7 @@ import (
 )
 
 func newFollower(r *Raft) *follower {
-	r.votedFor = "" // remove votedFor when it becomes follower again
+	// r.votedFor = "" // remove votedFor when it becomes follower again
 	rand.Seed(time.Now().UnixNano())
 	return &follower{
 		Raft: r,
@@ -27,12 +27,11 @@ func (f *follower) Run() {
 		select {
 		case <-time.After(f.electionTimeout):
 			log.Debug().Msg("election timeout")
-			f.ChangeState(newCandidate(f.Raft))
+			f.changeState(newCandidate(f.Raft))
 			return
-		case voteReq, ok := <-f.voteGrantedChan:
-			if ok {
-				f.votedFor = voteReq.CandidateId
-				f.currentTerm = voteReq.Term
+		case voteReq, _ := <-f.voteGrantedChan:
+			if err := f.voteGranted(voteReq.CandidateId, voteReq.Term); err != nil {
+				log.Error().Err(err).Msg("unable to update state after vote is granted")
 			}
 		case <-f.appendEntriesSuccessChan:
 			log.Debug().

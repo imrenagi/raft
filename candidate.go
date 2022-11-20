@@ -71,21 +71,21 @@ func (c *candidate) Run() {
 					Int("total_votes", c.totalVotes).
 					Msgf("received majority vote")
 				// transition to leader
-				c.ChangeState(newLeader(c.Raft))
+				c.changeState(newLeader(c.Raft))
 				return
 			}
-		case voteReq, ok := <-c.voteGrantedChan: // TODO(imre) seems duplicated with follower code
-			if ok {
-				c.votedFor = voteReq.CandidateId
-				c.currentTerm = voteReq.Term
+		case voteReq, _ := <-c.voteGrantedChan:
+			if err := c.voteGranted(voteReq.CandidateId, voteReq.Term); err != nil {
+				log.Error().Err(err).Msg("unable to update state after vote is granted")
 			}
 		case _, ok := <-c.appendEntriesSuccessChan:
 			if ok {
-				c.ChangeState(newFollower(c.Raft))
+				c.changeState(newFollower(c.Raft))
+				return
 			}
 		case <-time.After(c.electionTimeout):
 			log.Debug().Msg("voting timeout")
-			c.ChangeState(newFollower(c.Raft))
+			c.changeState(newFollower(c.Raft))
 			return
 		}
 	}

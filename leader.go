@@ -54,6 +54,7 @@ func (l *leader) Run() {
 				}(server)
 			}
 		}
+
 	}
 }
 
