@@ -90,3 +90,7 @@ func (c *candidate) Run() {
 		}
 	}
 }
+
+func (c candidate) String() string {
+	return "candidate"
+}

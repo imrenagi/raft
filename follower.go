@@ -41,3 +41,7 @@ func (f *follower) Run() {
 		}
 	}
 }
+
+func (f follower) String() string {
+	return "follower"
+}

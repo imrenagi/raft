@@ -56,3 +56,7 @@ func (l *leader) Run() {
 		}
 	}
 }
+
+func (l leader) String() string {
+	return "leader"
+}

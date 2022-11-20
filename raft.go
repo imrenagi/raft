@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/imrenagi/raft/api"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
+	"gopkg.in/yaml.v3"
 )
 
 type Log struct {
@@ -34,10 +36,13 @@ const (
 )
 
 func NewRaft() *Raft {
+
+	id := os.Getenv("RAFT_SERVER_ID")
+
 	rand.Seed(time.Now().UnixNano())
 	tms := rand.Intn(maxElectionTimeoutMs-minElectionTimeoutMs) + minElectionTimeoutMs
 	raft := &Raft{
-		id: os.Getenv("RAFT_SERVER_ID"),
+		id: id,
 		server: ServerAddr{
 			ID:   "1",
 			Host: "127.0.0.1",
@@ -50,22 +55,25 @@ func NewRaft() *Raft {
 				Host: "127.0.0.1",
 				Port: "8001",
 			},
-			{
-				ID:   "2",
-				Host: "127.0.0.1",
-				Port: "8002",
-			},
-			{
-				ID:   "3",
-				Host: "127.0.0.1",
-				Port: "8003",
-			},
+			// {
+			// 	ID:   "2",
+			// 	Host: "127.0.0.1",
+			// 	Port: "8002",
+			// },
+			// {
+			// 	ID:   "3",
+			// 	Host: "127.0.0.1",
+			// 	Port: "8003",
+			// },
 		},
 		voteGrantedChan:          make(chan *api.VoteRequest),
 		appendEntriesSuccessChan: make(chan *api.AppendEntriesRequest),
 	}
-	state := newFollower(raft)
-	raft.ChangeState(state)
+
+	if err := raft.readState(); err != nil {
+		log.Fatal().Err(err).Msg("unable to initialize state")
+	}
+
 	return raft
 }
 
@@ -146,7 +154,6 @@ func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.Vote
 					VoteGranted: true,
 				}, nil
 			}
-
 		}
 	}
 
@@ -175,9 +182,93 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 }
 
 type state interface {
+	fmt.Stringer
+
 	Run()
 }
 
 func (r *Raft) ChangeState(state state) {
 	r.state = state
+}
+
+type stateConf struct {
+	Term     int32  `yaml:"term"`
+	VotedFor string `yaml:"votedFor"`
+	Role     string `yaml:"role"`
+}
+
+type stateOptions struct {
+	fileName string
+}
+
+type stateOption func(*stateOptions)
+
+const (
+	stateFileFmt = "%s.state.yaml"
+)
+
+func (r *Raft) readState(opts ...stateOption) error {
+	options := &stateOptions{
+		fileName: fmt.Sprintf(stateFileFmt, r.id),
+	}
+	for _, o := range opts {
+		o(options)
+	}
+
+	f, err := os.OpenFile(options.fileName, os.O_RDWR|os.O_CREATE, 0755)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	stateConf := &stateConf{}
+	decoder := yaml.NewDecoder(f)
+	err = decoder.Decode(&stateConf)
+	if err != nil && err != io.EOF {
+		log.Error().Err(err).Msg("unable to decode message")
+		return err
+	}
+
+	r.votedFor = stateConf.VotedFor
+	r.currentTerm = stateConf.Term
+	var raftRole state
+	switch stateConf.Role {
+	case "candidate":
+		raftRole = newCandidate(r)
+	case "leader":
+		raftRole = newLeader(r)
+	default:
+		raftRole = newFollower(r)
+	}
+	r.ChangeState(raftRole)
+
+	return nil
+}
+
+func (r Raft) SaveState(opts ...stateOption) error {
+	options := &stateOptions{
+		fileName: fmt.Sprintf(stateFileFmt, r.id),
+	}
+	for _, o := range opts {
+		o(options)
+	}
+
+	f, err := os.OpenFile(options.fileName, os.O_RDWR|os.O_CREATE, 0755)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	encoder := yaml.NewEncoder(f)
+	defer encoder.Close()
+	err = encoder.Encode(&stateConf{
+		Term:     r.currentTerm,
+		VotedFor: r.votedFor,
+		Role:     r.state.String(),
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
