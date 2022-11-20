@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"time"
 
 	"github.com/imrenagi/raft/api"
@@ -23,7 +24,7 @@ type candidate struct {
 	totalVotes int
 }
 
-func (c *candidate) Run() {
+func (c *candidate) Run(ctx context.Context) {
 	c.currentTerm++ // increment current term
 
 	log.Debug().
@@ -88,6 +89,9 @@ func (c *candidate) Run() {
 		case <-time.After(c.electionTimeout):
 			log.Debug().Msg("voting timeout")
 			c.changeState(newFollower(c.Raft))
+			return
+		case <-ctx.Done():
+			log.Info().Msg("context is done")
 			return
 		}
 	}

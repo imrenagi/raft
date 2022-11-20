@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"math/rand"
 	"time"
 
@@ -19,7 +20,7 @@ type follower struct {
 	*Raft
 }
 
-func (f *follower) Run() {
+func (f *follower) Run(ctx context.Context) {
 	log.Debug().
 		Int32("currentTerm", f.currentTerm).
 		Msg("follower run")
@@ -37,6 +38,9 @@ func (f *follower) Run() {
 			log.Debug().
 				Int32("currentTerm", f.currentTerm).
 				Msgf("follower is receiving append entries")
+		case <-ctx.Done():
+			log.Info().Msg("context is done")
+			return
 		}
 	}
 }

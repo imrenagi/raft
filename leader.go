@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"time"
 
 	"github.com/imrenagi/raft/api"
@@ -17,7 +18,7 @@ type leader struct {
 	*Raft
 }
 
-func (l *leader) Run() {
+func (l *leader) Run(ctx context.Context) {
 
 	log.Info().Msg("running as leader")
 
@@ -28,6 +29,9 @@ func (l *leader) Run() {
 
 	for {
 		select {
+		case <-ctx.Done():
+			log.Info().Msg("context is done")
+			return
 		case s, ok := <-l.appendEntriesSuccessChan:
 			if ok {
 				l.currentTerm = s.Term // TODO(imre) change this later

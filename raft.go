@@ -106,12 +106,17 @@ type Raft struct {
 	appendEntriesSuccessChan chan *api.AppendEntriesRequest
 }
 
-func (r *Raft) Run() {
+func (r Raft) Stop() error {
+	return nil
+}
+
+func (r *Raft) Run(ctx context.Context) {
 
 	lis, err := net.Listen("tcp", r.server.Addr())
 	if err != nil {
 		log.Fatal().Msgf("failed to listen: %v", err)
 	}
+	defer lis.Close()
 	var opts []grpc.ServerOption
 
 	grpcServer := grpc.NewServer(opts...)
@@ -126,9 +131,22 @@ func (r *Raft) Run() {
 		}
 	}()
 
-	for {
-		r.state.Run()
-	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				log.Warn().Msg("raft loop exited")
+				return
+			default:
+				r.state.Run(ctx)
+			}
+		}
+	}()
+
+	<-ctx.Done()
+
+	grpcServer.GracefulStop()
+	log.Warn().Msg("grpc server gracefully stopped")
 }
 
 func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.VoteResponse, error) {
@@ -210,7 +228,7 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 type state interface {
 	fmt.Stringer
 
-	Run()
+	Run(ctx context.Context)
 }
 
 func (r *Raft) changeState(state state) error {
