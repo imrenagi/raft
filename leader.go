@@ -54,5 +54,10 @@ func (l *leader) Run() {
 				}(server)
 			}
 		}
+
 	}
+}
+
+func (l leader) String() string {
+	return "leader"
 }
