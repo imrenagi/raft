@@ -49,6 +49,7 @@ func (c *candidate) Run() {
 				})
 				if err != nil {
 					log.Error().Err(err).Msg("fail to request for vote")
+					return
 				}
 				log.Info().
 					Str("voter", server.Addr()).
@@ -78,8 +79,9 @@ func (c *candidate) Run() {
 			if err := c.voteGranted(voteReq.CandidateId, voteReq.Term); err != nil {
 				log.Error().Err(err).Msg("unable to update state after vote is granted")
 			}
-		case _, ok := <-c.appendEntriesSuccessChan:
+		case s, ok := <-c.appendEntriesSuccessChan:
 			if ok {
+				c.currentTerm = s.Term // TODO(imre) change this later
 				c.changeState(newFollower(c.Raft))
 				return
 			}

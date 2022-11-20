@@ -28,6 +28,12 @@ func (l *leader) Run() {
 
 	for {
 		select {
+		case s, ok := <-l.appendEntriesSuccessChan:
+			if ok {
+				l.currentTerm = s.Term // TODO(imre) change this later
+				l.changeState(newFollower(l.Raft))
+				return
+			}
 		case <-ticker.C:
 			for _, server := range l.servers {
 				go func(server ServerAddr) {
@@ -44,6 +50,7 @@ func (l *leader) Run() {
 						})
 						if err != nil {
 							log.Error().Err(err).Msg("unable to call append entries")
+							return
 						}
 
 						log.Debug().
@@ -54,7 +61,6 @@ func (l *leader) Run() {
 				}(server)
 			}
 		}
-
 	}
 }
 

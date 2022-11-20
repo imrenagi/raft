@@ -8,7 +8,7 @@ import (
 )
 
 func newFollower(r *Raft) *follower {
-	// r.votedFor = "" // remove votedFor when it becomes follower again
+	r.votedFor = "" // remove votedFor when it becomes follower again
 	rand.Seed(time.Now().UnixNano())
 	return &follower{
 		Raft: r,
