@@ -13,20 +13,52 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type Server struct {
+type Options struct {
+	Port string
+
+	RaftPort string
 }
 
-func (s Server) Run(ctx context.Context, port int) error {
+func New(o Options) *Server {
+	return &Server{
+		opts: o,
+	}
+}
 
-	r := raft.NewRaft()
+type Server struct {
+	opts Options
+}
+
+func (s Server) Run(ctx context.Context) error {
+
+	r := raft.New(
+		raft.WithServerPort(s.opts.RaftPort),
+		raft.WithServerConfig(fmt.Sprintf("examples/shell_executor/tmp/%s.yaml", s.opts.RaftPort)),
+	)
 	go r.Run(ctx)
 
 	shExec := shellExec{
-		workDir: fmt.Sprintf("examples/shell_executor/out/%d", port),
+		workDir: fmt.Sprintf("examples/shell_executor/out/%s", s.opts.Port),
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+
+		leader, err := r.GetLeaderAddr()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		log.Debug().Msgf("leader addr: %s", leader)
+
+		if r.Id != leader {
+			http.Error(w, "im no leader", http.StatusUnprocessableEntity)
+			return
+		}
+
+		log.Debug().Msgf("processing request because Im the leader")
+
 		b, err := io.ReadAll(req.Body)
 		if err != nil {
 			http.Error(w, "invalid body", http.StatusBadRequest)
@@ -39,12 +71,12 @@ func (s Server) Run(ctx context.Context, port int) error {
 			http.Error(w, fmt.Sprintf("command execution error: %s", err), http.StatusUnprocessableEntity)
 			return
 		}
-		
+
 		w.Write(out)
 	})
 
 	httpSrv := http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
+		Addr:    fmt.Sprintf(":%s", s.opts.Port),
 		Handler: mux,
 	}
 	go func() {

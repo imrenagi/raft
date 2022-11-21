@@ -12,8 +12,8 @@ import (
 type RPC struct {
 }
 
-func (r RPC) RequestVote(server ServerAddr, req *api.VoteRequest) (*api.VoteResponse, error) {
-	conn, err := grpc.Dial(server.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+func (r RPC) RequestVote(server string, req *api.VoteRequest) (*api.VoteResponse, error) {
+	conn, err := grpc.Dial(server, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Error().Err(err).Msg("unable to dial the server")
 		return nil, err
@@ -23,8 +23,8 @@ func (r RPC) RequestVote(server ServerAddr, req *api.VoteRequest) (*api.VoteResp
 	return client.RequestVote(context.TODO(), req)
 }
 
-func (r RPC) AppendEntries(server ServerAddr, req *api.AppendEntriesRequest) (*api.AppendEntriesResponse, error) {
-	conn, err := grpc.Dial(server.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+func (r RPC) AppendEntries(server string, req *api.AppendEntriesRequest) (*api.AppendEntriesResponse, error) {
+	conn, err := grpc.Dial(server, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Error().Err(err).Msg("unable to dial the server")
 		return nil, err

@@ -20,72 +20,99 @@ type Log struct {
 	Term    int32
 }
 
-type ServerAddr struct {
-	ID   string
-	Host string
-	Port string
-}
-
-func (s ServerAddr) Addr() string {
-	return fmt.Sprintf("%s:%s", s.Host, s.Port)
-}
-
 const (
 	minElectionTimeoutMs int = 5000  // 150
 	maxElectionTimeoutMs int = 10000 // 300
 )
 
-func NewRaft() *Raft {
+type Options struct {
+	port       string
+	configPath string
+}
 
-	id := os.Getenv("RAFT_SERVER_ID")
+type Option func(*Options)
+
+func WithServerPort(port string) Option {
+	return func(options *Options) {
+		options.port = port
+	}
+}
+
+func WithServerConfig(filePath string) Option {
+	return func(options *Options) {
+		options.configPath = filePath
+	}
+}
+
+func defaultOptions() *Options {
+	return &Options{
+		configPath: "raft.yaml",
+		port:       "8001",
+	}
+}
+
+func New(opts ...Option) *Raft {
+	options := defaultOptions()
+	for _, o := range opts {
+		o(options)
+	}
+
+	f, err := os.OpenFile(options.configPath, os.O_RDWR|os.O_CREATE, 0755)
+	if err != nil {
+		log.Fatal().Err(err).Msg("unable to open config file")
+	}
+	defer f.Close()
 
 	rand.Seed(time.Now().UnixNano())
 	tms := rand.Intn(maxElectionTimeoutMs-minElectionTimeoutMs) + minElectionTimeoutMs
 	raft := &Raft{
-		id: id,
-		server: ServerAddr{
-			ID:   "1",
-			Host: "127.0.0.1",
-			Port: os.Getenv("RAFT_SERVER_PORT"),
-		},
+		Id:              fmt.Sprintf("%s:%s", "127.0.0.1", options.port),
 		electionTimeout: time.Duration(tms) * time.Millisecond,
-		servers: []ServerAddr{
-			{
-				ID:   "1",
-				Host: "127.0.0.1",
-				Port: "8001",
-			},
-			{
-				ID:   "2",
-				Host: "127.0.0.1",
-				Port: "8002",
-			},
-			{
-				ID:   "3",
-				Host: "127.0.0.1",
-				Port: "8003",
-			},
+		servers: []string{
+			"127.0.0.1:8001",
+			"127.0.0.1:8002",
+			"127.0.0.1:8003",
 		},
 		voteGrantedChan:          make(chan *api.VoteRequest),
 		appendEntriesSuccessChan: make(chan *api.AppendEntriesRequest),
+		options:                  options,
 	}
 
-	if err := raft.readState(); err != nil {
-		log.Fatal().Err(err).Msg("unable to initialize state")
+	decoder := yaml.NewDecoder(f)
+	err = decoder.Decode(&raft)
+	if err != nil && err != io.EOF {
+		log.Fatal().Err(err).Msg("unable to decode message")
 	}
+
+	var raftRole state
+	switch raft.Role {
+	case "candidate":
+		raftRole = newCandidate(raft)
+	case "leader":
+		raftRole = newLeader(raft)
+	default:
+		raftRole = newFollower(raft)
+	}
+	raft.changeState(raftRole)
+
+	log.Debug().
+		Str("votedFor", raft.VotedFor).
+		Int32("CurrentTerm", raft.CurrentTerm).
+		Str("role", raft.state.String()).
+		Msg("successfully read config file")
 
 	return raft
 }
 
 type Raft struct {
-	api.UnimplementedRaftServer
+	api.UnimplementedRaftServer `yaml:"-"`
 
-	id     string
-	server ServerAddr
+	Id       string `yaml:"id"`
+	LeaderId string `yaml:"leaderId"`
 
 	// persistent state on all servers
-	currentTerm int32
-	votedFor    string
+	CurrentTerm int32  `yaml:"term"`
+	VotedFor    string `yaml:"votedFor"`
 	logs        []Log
 
 	// volatile state on all servers
@@ -96,23 +123,22 @@ type Raft struct {
 	nextIndex  []interface{}
 	matchIndex []interface{}
 
+	Role  string `yaml:"role"`
 	state state
 
-	servers []ServerAddr
+	servers []string
 
 	electionTimeout time.Duration
 
 	voteGrantedChan          chan *api.VoteRequest
 	appendEntriesSuccessChan chan *api.AppendEntriesRequest
-}
 
-func (r Raft) Stop() error {
-	return nil
+	options *Options
 }
 
 func (r *Raft) Run(ctx context.Context) {
 
-	lis, err := net.Listen("tcp", r.server.Addr())
+	lis, err := net.Listen("tcp", r.Id)
 	if err != nil {
 		log.Fatal().Msgf("failed to listen: %v", err)
 	}
@@ -122,7 +148,7 @@ func (r *Raft) Run(ctx context.Context) {
 	grpcServer := grpc.NewServer(opts...)
 	api.RegisterRaftServer(grpcServer, r)
 
-	log.Info().Msgf("starting grpc server on %s", r.server.Addr())
+	log.Info().Msgf("starting grpc server on %s", r.Id)
 
 	go func() {
 		err = grpcServer.Serve(lis)
@@ -149,27 +175,42 @@ func (r *Raft) Run(ctx context.Context) {
 	log.Warn().Msg("grpc server gracefully stopped")
 }
 
+func (r Raft) GetLeaderAddr() (string, error) {
+	fmt.Println("leader id", r.LeaderId)
+
+	if r.LeaderId == "" {
+		return "", fmt.Errorf("no elected leader")
+	}
+
+	for _, s := range r.servers {
+		if s == r.Id {
+			return s, nil
+		}
+	}
+	return "", fmt.Errorf("no leader with identified leader id %s", r.LeaderId)
+}
+
 func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.VoteResponse, error) {
 	log.Debug().
 		Int32("cTerm", req.Term).
 		Str("cId", req.CandidateId).
 		Int32("clastLastLogIdx", req.LastLogIdx).
 		Int32("cLastLogTerm", req.LastLogTerm).
-		Str("srvVotedFor", r.votedFor).
+		Str("srvVotedFor", r.VotedFor).
 		Msgf("vote request is received")
 
-	if r.currentTerm > req.Term {
+	if r.CurrentTerm > req.Term {
 		log.Debug().Msg("candidate is left behind")
 		return &api.VoteResponse{
-			Term:        r.currentTerm,
+			Term:        r.CurrentTerm,
 			VoteGranted: false,
 		}, nil
 	}
 
-	if r.currentTerm == req.Term && r.votedFor != "" && r.votedFor != req.CandidateId {
+	if r.CurrentTerm == req.Term && r.VotedFor != "" && r.VotedFor != req.CandidateId {
 		log.Debug().Msg("vote for current term has been given to other candidate")
 		return &api.VoteResponse{
-			Term:        r.currentTerm,
+			Term:        r.CurrentTerm,
 			VoteGranted: false,
 		}, nil
 	}
@@ -186,7 +227,7 @@ func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.Vote
 			log.Debug().Msg("candidate term is same and its log is longer or equal with receiver log")
 			r.voteGrantedChan <- req
 			return &api.VoteResponse{
-				Term:        r.currentTerm,
+				Term:        r.CurrentTerm,
 				VoteGranted: true,
 			}, nil
 		}
@@ -196,23 +237,23 @@ func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.Vote
 		log.Debug().Msg("candidate term is more up to date than the receiver term")
 		r.voteGrantedChan <- req
 		return &api.VoteResponse{
-			Term:        r.currentTerm,
+			Term:        r.CurrentTerm,
 			VoteGranted: true,
 		}, nil
 	}
 
 	log.Debug().Msg("vote is not granted. candidate doesn't satisfy any requirements to become leader")
 	return &api.VoteResponse{
-		Term:        r.currentTerm,
+		Term:        r.CurrentTerm,
 		VoteGranted: false,
 	}, nil
 }
 
 func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest) (*api.AppendEntriesResponse, error) {
 	// implementation 1
-	if req.Term < r.currentTerm {
+	if req.Term < r.CurrentTerm {
 		return &api.AppendEntriesResponse{
-			Term:    r.currentTerm,
+			Term:    r.CurrentTerm,
 			Success: false,
 		}, nil
 	}
@@ -220,7 +261,7 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 	r.appendEntriesSuccessChan <- req
 
 	return &api.AppendEntriesResponse{
-		Term:    r.currentTerm,
+		Term:    r.CurrentTerm,
 		Success: true,
 	}, nil
 }
@@ -242,8 +283,8 @@ func (r *Raft) changeState(state state) error {
 }
 
 func (r *Raft) voteGranted(toCandidate string, forTerm int32) error {
-	r.votedFor = toCandidate
-	r.currentTerm = forTerm
+	r.VotedFor = toCandidate
+	r.CurrentTerm = forTerm
 
 	if err := r.saveState(); err != nil {
 		return err
@@ -251,87 +292,21 @@ func (r *Raft) voteGranted(toCandidate string, forTerm int32) error {
 	return nil
 }
 
-type stateConf struct {
-	Term     int32  `yaml:"term"`
-	VotedFor string `yaml:"votedFor"`
-	Role     string `yaml:"role"`
-}
+func (r Raft) saveState() error {
+	options := r.options
 
-type stateOptions struct {
-	fileName string
-}
-
-type stateOption func(*stateOptions)
-
-const (
-	stateFileFmt = "%s.state.yaml"
-)
-
-func (r *Raft) readState(opts ...stateOption) error {
-	options := &stateOptions{
-		fileName: fmt.Sprintf(stateFileFmt, r.id),
-	}
-	for _, o := range opts {
-		o(options)
-	}
-
-	f, err := os.OpenFile(options.fileName, os.O_RDWR|os.O_CREATE, 0755)
+	f, err := os.OpenFile(options.configPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	stateConf := &stateConf{}
-	decoder := yaml.NewDecoder(f)
-	err = decoder.Decode(&stateConf)
-	if err != nil && err != io.EOF {
-		log.Error().Err(err).Msg("unable to decode message")
-		return err
-	}
-
-	r.votedFor = stateConf.VotedFor
-	r.currentTerm = stateConf.Term
-	var raftRole state
-	switch stateConf.Role {
-	case "candidate":
-		raftRole = newCandidate(r)
-	case "leader":
-		raftRole = newLeader(r)
-	default:
-		raftRole = newFollower(r)
-	}
-	r.changeState(raftRole)
-
-	log.Debug().
-		Str("votedFor", r.votedFor).
-		Int32("currentTerm", r.currentTerm).
-		Str("role", r.state.String()).
-		Msg("successfully read config file")
-
-	return nil
-}
-
-func (r Raft) saveState(opts ...stateOption) error {
-	options := &stateOptions{
-		fileName: fmt.Sprintf(stateFileFmt, r.id),
-	}
-	for _, o := range opts {
-		o(options)
-	}
-
-	f, err := os.OpenFile(options.fileName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+	// TODO change this on custom unmarshall
+	r.Role = r.state.String()
 
 	encoder := yaml.NewEncoder(f)
 	defer encoder.Close()
-	if err = encoder.Encode(&stateConf{
-		Term:     r.currentTerm,
-		VotedFor: r.votedFor,
-		Role:     r.state.String(),
-	}); err != nil {
+	if err = encoder.Encode(&r); err != nil {
 		return err
 	}
 

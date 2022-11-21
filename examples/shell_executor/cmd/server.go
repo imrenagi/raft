@@ -13,9 +13,8 @@ import (
 
 func serverCmd() *cobra.Command {
 	var (
-		raftListenPort  int
-		raftServerId    string
-		shellServerPort int
+		raftServerPort  string
+		shellServerPort string
 	)
 
 	var command = &cobra.Command{
@@ -35,17 +34,19 @@ func serverCmd() *cobra.Command {
 				cancel()
 			}()
 
-			srv := server.Server{}
-			err := srv.Run(ctx, shellServerPort)
+			srv := server.New(server.Options{
+				Port:     shellServerPort,
+				RaftPort: raftServerPort,
+			})
+			err := srv.Run(ctx)
 			if err != nil {
 				log.Fatal().Msg("unable to run the shell executor server")
 			}
 		},
 	}
 
-	command.Flags().IntVar(&raftListenPort, "raft-port", 8001, "raft listener port")
-	command.Flags().StringVar(&raftServerId, "raft-server-id", "1", "raft server id")
-	command.Flags().IntVar(&shellServerPort, "port", 9001, "shell executor listener port")
+	command.Flags().StringVar(&raftServerPort, "raft-port", "8001", "raft listener port")
+	command.Flags().StringVar(&shellServerPort, "port", "9001", "shell executor listener port")
 
 	return command
 }
