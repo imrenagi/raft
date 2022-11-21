@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"time"
 
 	"github.com/imrenagi/raft/api"
@@ -8,6 +9,7 @@ import (
 )
 
 func newLeader(r *Raft) *leader {
+	r.LeaderId = r.Id
 	return &leader{
 		Raft: r,
 	}
@@ -17,7 +19,7 @@ type leader struct {
 	*Raft
 }
 
-func (l *leader) Run() {
+func (l *leader) Run(ctx context.Context) {
 
 	log.Info().Msg("running as leader")
 
@@ -28,21 +30,25 @@ func (l *leader) Run() {
 
 	for {
 		select {
+		case <-ctx.Done():
+			log.Info().Msg("context is done")
+			return
 		case s, ok := <-l.appendEntriesSuccessChan:
 			if ok {
-				l.currentTerm = s.Term // TODO(imre) change this later
+				l.CurrentTerm = s.Term // TODO(imre) change this later
+				l.LeaderId = s.LeaderId
 				l.changeState(newFollower(l.Raft))
 				return
 			}
 		case <-ticker.C:
 			for _, server := range l.servers {
-				go func(server ServerAddr) {
-					if server.ID != l.id {
+				go func(server string) {
+					if server != l.Id {
 
 						rpc := RPC{}
 						res, err := rpc.AppendEntries(server, &api.AppendEntriesRequest{
-							Term:            l.currentTerm,
-							LeaderId:        l.id,
+							Term:            l.CurrentTerm,
+							LeaderId:        l.Id,
 							PrevLogIdx:      0,
 							PrevLogTerm:     0,
 							LeaderCommitIdx: 0,
@@ -54,7 +60,7 @@ func (l *leader) Run() {
 						}
 
 						log.Debug().
-							Int32("currentTerm", l.currentTerm).
+							Int32("CurrentTerm", l.CurrentTerm).
 							Bool("success", res.Success).
 							Msg("append entries is completed")
 					}

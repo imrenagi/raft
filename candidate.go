@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"time"
 
 	"github.com/imrenagi/raft/api"
@@ -8,7 +9,7 @@ import (
 )
 
 func newCandidate(r *Raft) *candidate {
-	r.votedFor = r.id
+	r.VotedFor = r.Id
 
 	c := &candidate{
 		Raft:       r,
@@ -23,27 +24,27 @@ type candidate struct {
 	totalVotes int
 }
 
-func (c *candidate) Run() {
-	c.currentTerm++ // increment current term
+func (c *candidate) Run(ctx context.Context) {
+	c.CurrentTerm++ // increment current term
 
 	log.Debug().
-		Int32("currentTerm", c.currentTerm).
+		Int32("CurrentTerm", c.CurrentTerm).
 		Msg("candidate run")
 
 	// vote itself
 	// send request vote RPC to other ServerAddr
 	voteResponseChan := make(chan *api.VoteResponse, len(c.servers))
 	for _, server := range c.servers {
-		go func(server ServerAddr) {
-			if c.id != server.ID {
+		go func(server string) {
+			if c.Id != server {
 				log.Debug().
-					Str("voter", server.Addr()).
+					Str("voter", server).
 					Msg("requesting vote")
 
 				rpc := RPC{}
 				res, err := rpc.RequestVote(server, &api.VoteRequest{
-					Term:        c.currentTerm,
-					CandidateId: c.id,
+					Term:        c.CurrentTerm,
+					CandidateId: c.Id,
 					LastLogIdx:  0,
 					LastLogTerm: 0,
 				})
@@ -52,7 +53,7 @@ func (c *candidate) Run() {
 					return
 				}
 				log.Info().
-					Str("voter", server.Addr()).
+					Str("voter", server).
 					Bool("vote_granted", res.VoteGranted).
 					Msg("received vote response")
 				voteResponseChan <- res
@@ -81,13 +82,17 @@ func (c *candidate) Run() {
 			}
 		case s, ok := <-c.appendEntriesSuccessChan:
 			if ok {
-				c.currentTerm = s.Term // TODO(imre) change this later
+				c.CurrentTerm = s.Term // TODO(imre) change this later
+				c.LeaderId = s.LeaderId
 				c.changeState(newFollower(c.Raft))
 				return
 			}
 		case <-time.After(c.electionTimeout):
 			log.Debug().Msg("voting timeout")
 			c.changeState(newFollower(c.Raft))
+			return
+		case <-ctx.Done():
+			log.Info().Msg("context is done")
 			return
 		}
 	}

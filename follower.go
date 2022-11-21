@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"math/rand"
 	"time"
 
@@ -8,7 +9,7 @@ import (
 )
 
 func newFollower(r *Raft) *follower {
-	r.votedFor = "" // remove votedFor when it becomes follower again
+	r.VotedFor = "" // remove votedFor when it becomes follower again
 	rand.Seed(time.Now().UnixNano())
 	return &follower{
 		Raft: r,
@@ -19,9 +20,9 @@ type follower struct {
 	*Raft
 }
 
-func (f *follower) Run() {
+func (f *follower) Run(ctx context.Context) {
 	log.Debug().
-		Int32("currentTerm", f.currentTerm).
+		Int32("CurrentTerm", f.CurrentTerm).
 		Msg("follower run")
 	for {
 		select {
@@ -33,10 +34,17 @@ func (f *follower) Run() {
 			if err := f.voteGranted(voteReq.CandidateId, voteReq.Term); err != nil {
 				log.Error().Err(err).Msg("unable to update state after vote is granted")
 			}
-		case <-f.appendEntriesSuccessChan:
+		case s, _ := <-f.appendEntriesSuccessChan:
+			f.LeaderId = s.LeaderId // TODO(imre) change this later and its safe
+			if err := f.saveState(); err != nil {
+				// return
+			}
 			log.Debug().
-				Int32("currentTerm", f.currentTerm).
+				Int32("CurrentTerm", f.CurrentTerm).
 				Msgf("follower is receiving append entries")
+		case <-ctx.Done():
+			log.Info().Msg("context is done")
+			return
 		}
 	}
 }
