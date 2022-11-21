@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
+	"os/exec"
 	"time"
 
 	"github.com/imrenagi/raft"
@@ -18,13 +21,26 @@ func (s Server) Run(ctx context.Context, port int) error {
 	r := raft.NewRaft()
 	go r.Run(ctx)
 
-	var counter int
+	shExec := shellExec{
+		workDir: fmt.Sprintf("examples/shell_executor/out/%d", port),
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
-		counter++
-		fmt.Println("counter", counter)
-		w.Write([]byte("ok"))
+		b, err := io.ReadAll(req.Body)
+		if err != nil {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+
+		command := string(b)
+		out, err := shExec.Apply(req.Context(), command)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("command execution error: %s", err), http.StatusUnprocessableEntity)
+			return
+		}
+		
+		w.Write(out)
 	})
 
 	httpSrv := http.Server{
@@ -52,4 +68,20 @@ func (s Server) Run(ctx context.Context, port int) error {
 
 	<-time.After(1 * time.Second)
 	return nil
+}
+
+type shellExec struct {
+	workDir string
+}
+
+func (s shellExec) Apply(ctx context.Context, command string) ([]byte, error) {
+	cmd := exec.Command("bash", "-c", command)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Dir = s.workDir
+
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }

@@ -7,3 +7,5 @@
 /out/
 
 *.state.yaml
+
+examples/shell_executor/out/
