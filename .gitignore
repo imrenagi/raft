@@ -1,0 +1,10 @@
+*.iml
+*.ipr
+*.iws
+.idea/
+/build/
+/dist/
+/out/
+
+examples/shell_executor/out/
+examples/shell_executor/tmp/
