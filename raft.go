@@ -183,7 +183,7 @@ func (r Raft) GetLeaderAddr() (string, error) {
 	}
 
 	for _, s := range r.servers {
-		if s == r.Id {
+		if s == r.LeaderId {
 			return s, nil
 		}
 	}

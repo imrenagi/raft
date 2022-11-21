@@ -74,6 +74,26 @@ func (s Server) Run(ctx context.Context) error {
 
 		w.Write(out)
 	})
+	mux.HandleFunc("/leader", func(w http.ResponseWriter, req *http.Request) {
+		leader, err := r.GetLeaderAddr()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		log.Debug().
+			Str("serverId", r.Id).
+			Str("serverLeaderId", r.LeaderId).
+			Str("leaderId", leader). // incorrect
+			Msg("checking leader")
+
+		if r.Id != leader {
+			http.Error(w, "im no leader", http.StatusServiceUnavailable)
+			return
+		}
+
+		w.Write([]byte("ok"))
+	})
 
 	httpSrv := http.Server{
 		Addr:    fmt.Sprintf(":%s", s.opts.Port),
