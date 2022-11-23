@@ -15,11 +15,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type Log struct {
-	Command string
-	Term    int32
-}
-
 const (
 	minElectionTimeoutMs int = 5000  // 150
 	maxElectionTimeoutMs int = 10000 // 300
