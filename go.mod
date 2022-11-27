@@ -3,6 +3,7 @@ module github.com/imrenagi/raft
 go 1.19
 
 require (
+	github.com/boltdb/bolt v1.3.1 // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/inconshreveable/mousetrap v1.0.1 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect

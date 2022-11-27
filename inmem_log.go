@@ -6,31 +6,31 @@ func NewInMemoryLogStore() *InMemoryStore {
 	return &InMemoryStore{
 		lowIndex:  0,
 		highIndex: 0,
-		logs:      make(map[int32]Log),
+		logs:      make(map[uint64]Log),
 	}
 }
 
 type InMemoryStore struct {
 	sync.Mutex
 
-	lowIndex  int32
-	highIndex int32
-	logs      map[int32]Log
+	lowIndex  uint64
+	highIndex uint64
+	logs      map[uint64]Log
 }
 
-func (i *InMemoryStore) FirstIndex() (int32, error) {
+func (i *InMemoryStore) FirstIndex() (uint64, error) {
 	i.Lock()
 	defer i.Unlock()
 	return i.lowIndex, nil
 }
 
-func (i *InMemoryStore) LastIndex() (int32, error) {
+func (i *InMemoryStore) LastIndex() (uint64, error) {
 	i.Lock()
 	defer i.Unlock()
 	return i.highIndex, nil
 }
 
-func (i *InMemoryStore) GetLog(idx int32, log *Log) error {
+func (i *InMemoryStore) GetLog(idx uint64, log *Log) error {
 	i.Lock()
 	defer i.Unlock()
 	l, ok := i.logs[idx]
@@ -41,7 +41,7 @@ func (i *InMemoryStore) GetLog(idx int32, log *Log) error {
 	return nil
 }
 
-func (i *InMemoryStore) GetRangeLog(min, max int32) ([]Log, error) {
+func (i *InMemoryStore) GetRangeLog(min, max uint64) ([]Log, error) {
 	i.Lock()
 	defer i.Unlock()
 
@@ -75,7 +75,7 @@ func (i *InMemoryStore) StoreLogs(logs []Log) error {
 	return nil
 }
 
-func (i *InMemoryStore) DeleteRange(minIdx, maxIdx int32) error {
+func (i *InMemoryStore) DeleteRange(minIdx, maxIdx uint64) error {
 	i.Lock()
 	defer i.Unlock()
 	for j := minIdx; j <= maxIdx; j++ {

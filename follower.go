@@ -22,7 +22,7 @@ type follower struct {
 
 func (f *follower) Run(ctx context.Context) {
 	log.Debug().
-		Int32("CurrentTerm", f.CurrentTerm).
+		Uint64("CurrentTerm", f.CurrentTerm).
 		Msg("follower run")
 	for {
 		select {
@@ -48,9 +48,9 @@ func (f *follower) Run(ctx context.Context) {
 			newLastIdx, _ := f.logStore.LastIndex()
 
 			log.Debug().
-				Int32("firstIdx", firstIdx).
-				Int32("newLastIdx", newLastIdx).
-				Int32("CurrentTerm", f.CurrentTerm).
+				Uint64("firstIdx", firstIdx).
+				Uint64("newLastIdx", newLastIdx).
+				Uint64("CurrentTerm", f.CurrentTerm).
 				Msgf("follower is receiving append entries")
 		case <-ctx.Done():
 			log.Info().Msg("context is done")

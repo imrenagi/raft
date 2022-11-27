@@ -28,7 +28,7 @@ func (c *candidate) Run(ctx context.Context) {
 	c.CurrentTerm++ // increment current term
 
 	log.Debug().
-		Int32("CurrentTerm", c.CurrentTerm).
+		Uint64("CurrentTerm", c.CurrentTerm).
 		Msg("candidate run")
 
 	// vote itself

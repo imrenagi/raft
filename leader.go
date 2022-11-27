@@ -21,8 +21,8 @@ type leader struct {
 
 func (l *leader) initState() {
 
-	l.nextIndex = make(map[string]int32)
-	l.matchIndex = make(map[string]int32)
+	l.nextIndex = make(map[string]uint64)
+	l.matchIndex = make(map[string]uint64)
 
 	lastLogIndex, err := l.logStore.LastIndex()
 	if err != nil {
@@ -96,7 +96,7 @@ func (l *leader) Run(ctx context.Context) {
 
 						log.Debug().
 							Str("server", server).
-							Int32("CurrentTerm", l.CurrentTerm).
+							Uint64("CurrentTerm", l.CurrentTerm).
 							Bool("success", res.Success).
 							Msg("append entries is completed")
 					}

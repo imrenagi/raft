@@ -95,7 +95,7 @@ func New(opts ...Option) *Raft {
 
 	log.Debug().
 		Str("votedFor", raft.VotedFor).
-		Int32("CurrentTerm", raft.CurrentTerm).
+		Uint64("CurrentTerm", raft.CurrentTerm).
 		Str("role", raft.state.String()).
 		Msg("successfully read config file")
 
@@ -110,23 +110,23 @@ type Raft struct {
 	LeaderId string `yaml:"leaderId"`
 
 	// persistent state on all servers
-	CurrentTerm int32  `yaml:"term"`
+	CurrentTerm uint64 `yaml:"term"`
 	VotedFor    string `yaml:"votedFor"`
 
 	logStore LogStore
 
 	// volatile state on all servers
-	commitIndex int32
-	lastApplied int32
+	commitIndex uint64
+	lastApplied uint64
 
 	// volatile state on leaders
 	// nextIndex for each server, index of the next log entry
 	// to send to that server. initialized to leader last log index + 1
-	nextIndex map[string]int32
+	nextIndex map[string]uint64
 	// matchIndex for each server, index of the highest log entry
 	// to be replicated on that server. initialized to 0, increases
 	// monotonically
-	matchIndex map[string]int32
+	matchIndex map[string]uint64
 
 	Role  string `yaml:"role"`
 	state state
@@ -205,10 +205,10 @@ func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.Vote
 	defer r.Unlock()
 
 	log.Debug().
-		Int32("cTerm", req.Term).
+		Uint64("cTerm", req.Term).
 		Str("cId", req.CandidateId).
-		Int32("clastLastLogIdx", req.LastLogIdx).
-		Int32("cLastLogTerm", req.LastLogTerm).
+		Uint64("clastLastLogIdx", req.LastLogIdx).
+		Uint64("cLastLogTerm", req.LastLogTerm).
 		Str("srvVotedFor", r.VotedFor).
 		Msgf("vote request is received")
 
@@ -273,11 +273,11 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 	defer r.Unlock()
 
 	log.Debug().
-		Int32("leaderTerm", req.Term).
+		Uint64("leaderTerm", req.Term).
 		Str("leaderId", req.LeaderId).
-		Int32("leaderPrevLogIdx", req.PrevLogIdx).
-		Int32("leaderPrevLogTerm", req.PrevLogTerm).
-		Int32("leaderCommit", req.LeaderCommitIdx).
+		Uint64("leaderPrevLogIdx", req.PrevLogIdx).
+		Uint64("leaderPrevLogTerm", req.PrevLogTerm).
+		Uint64("leaderCommit", req.LeaderCommitIdx).
 		Int("entriesLength", len(req.Entries)).
 		Msg("receive append entries")
 
@@ -317,8 +317,8 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 		// case 2
 		if err == ErrLogNotFound {
 			log.Debug().
-				Int32("leaderPrevLogIdx", req.PrevLogIdx).
-				Int32("leaderPrevLogTerm", req.PrevLogTerm).
+				Uint64("leaderPrevLogIdx", req.PrevLogIdx).
+				Uint64("leaderPrevLogTerm", req.PrevLogTerm).
 				Msg("prev log on the given index is not found")
 			// should return false so that leader can perform consistency check
 			return &api.AppendEntriesResponse{
@@ -330,8 +330,8 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 		// case 4
 		if l.Term != req.PrevLogTerm {
 			log.Debug().
-				Int32("prevLogTerm", l.Term).
-				Int32("leaderPrevLogTerm", req.PrevLogTerm).
+				Uint64("prevLogTerm", l.Term).
+				Uint64("leaderPrevLogTerm", req.PrevLogTerm).
 				Msg("prev log term doesnt match")
 			// should return false so that leader can perform consistency check
 
@@ -453,8 +453,8 @@ func (r *Raft) CommitEntry(ctx context.Context, command []byte) error {
 	}
 
 	log.Debug().
-		Int32("index", newLog.Index).
-		Int32("term", newLog.Term).
+		Uint64("index", newLog.Index).
+		Uint64("term", newLog.Term).
 		Str("command", string(newLog.Command)).
 		Msg("created new log entry")
 
@@ -512,9 +512,9 @@ func (r *Raft) CommitEntry(ctx context.Context, command []byte) error {
 						}
 
 						log.Debug().
-							Int32("followerNextIndex", followerNextIndex).
-							Int32("leaderLastLogIndex", leaderLastLogIndex).
-							Int32("leaderLastPrevLogIndex", lastPrevLogIdx).
+							Uint64("followerNextIndex", followerNextIndex).
+							Uint64("leaderLastLogIndex", leaderLastLogIndex).
+							Uint64("leaderLastPrevLogIndex", lastPrevLogIdx).
 							Int("entriesLength", len(entries)).
 							Msgf("trying to append entries to server %v", server)
 
@@ -534,7 +534,7 @@ func (r *Raft) CommitEntry(ctx context.Context, command []byte) error {
 
 						log.Info().
 							Bool("success", res.Success).
-							Int32("term", res.Term).
+							Uint64("term", res.Term).
 							Str("server", server).
 							Msg("received append entry response")
 
@@ -552,7 +552,7 @@ func (r *Raft) CommitEntry(ctx context.Context, command []byte) error {
 
 						r.nextIndex[server] -= 1
 						log.Warn().
-							Int32("nextIndex", r.nextIndex[server]).
+							Uint64("nextIndex", r.nextIndex[server]).
 							Msgf("decrement server %v nextIndex", server)
 					}
 				}
@@ -634,7 +634,7 @@ func (r *Raft) changeState(state state) error {
 	return nil
 }
 
-func (r *Raft) voteGranted(toCandidate string, forTerm int32) error {
+func (r *Raft) voteGranted(toCandidate string, forTerm uint64) error {
 	r.VotedFor = toCandidate
 	r.CurrentTerm = forTerm
 
