@@ -65,12 +65,19 @@ func (s Server) Run(ctx context.Context) error {
 			return
 		}
 
-		command := string(b)
-		out, err := shExec.Apply(req.Context(), command)
+		err = r.CommitEntry(ctx, b)
+		if err != nil {
+			http.Error(w, "cant commit", http.StatusUnprocessableEntity)
+			return
+		}
+
+		out, err := shExec.Apply(req.Context(), b)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("command execution error: %s", err), http.StatusUnprocessableEntity)
 			return
 		}
+
+		// TODO (update lastapplied)
 
 		w.Write(out)
 	})
@@ -118,6 +125,8 @@ func (s Server) Run(ctx context.Context) error {
 	httpSrv.Shutdown(ctxShutDown)
 	log.Warn().Msg("shell server gracefully stopped")
 
+	shExec.CleanUp()
+
 	<-time.After(1 * time.Second)
 	return nil
 }
@@ -126,8 +135,8 @@ type shellExec struct {
 	workDir string
 }
 
-func (s shellExec) Apply(ctx context.Context, command string) ([]byte, error) {
-	cmd := exec.Command("bash", "-c", command)
+func (s shellExec) Apply(ctx context.Context, command []byte) ([]byte, error) {
+	cmd := exec.Command("bash", "-c", string(command))
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Dir = s.workDir
@@ -136,4 +145,8 @@ func (s shellExec) Apply(ctx context.Context, command string) ([]byte, error) {
 		return nil, err
 	}
 	return out.Bytes(), nil
+}
+
+func (s shellExec) CleanUp() {
+	// os.RemoveAll(s.workDir)
 }

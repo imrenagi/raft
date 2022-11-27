@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/imrenagi/raft/api"
@@ -63,14 +64,16 @@ func New(opts ...Option) *Raft {
 	raft := &Raft{
 		Id:              fmt.Sprintf("%s:%s", "127.0.0.1", options.port),
 		electionTimeout: time.Duration(tms) * time.Millisecond,
+		logStore:        NewInMemoryLogStore(),
 		servers: []string{
 			"127.0.0.1:8001",
 			"127.0.0.1:8002",
 			"127.0.0.1:8003",
 		},
-		voteGrantedChan:          make(chan *api.VoteRequest),
-		appendEntriesSuccessChan: make(chan *api.AppendEntriesRequest),
-		options:                  options,
+		voteGrantedChan:      make(chan *api.VoteRequest),
+		commitEntryChan:      make(chan Log),
+		validLeaderHeartbeat: make(chan *api.AppendEntriesRequest),
+		options:              options,
 	}
 
 	decoder := yaml.NewDecoder(f)
@@ -100,6 +103,7 @@ func New(opts ...Option) *Raft {
 }
 
 type Raft struct {
+	sync.Mutex
 	api.UnimplementedRaftServer `yaml:"-"`
 
 	Id       string `yaml:"id"`
@@ -108,15 +112,21 @@ type Raft struct {
 	// persistent state on all servers
 	CurrentTerm int32  `yaml:"term"`
 	VotedFor    string `yaml:"votedFor"`
-	logs        []Log
+
+	logStore LogStore
 
 	// volatile state on all servers
-	commitIndex int
-	lastApplied int
+	commitIndex int32
+	lastApplied int32
 
 	// volatile state on leaders
-	nextIndex  []interface{}
-	matchIndex []interface{}
+	// nextIndex for each server, index of the next log entry
+	// to send to that server. initialized to leader last log index + 1
+	nextIndex map[string]int32
+	// matchIndex for each server, index of the highest log entry
+	// to be replicated on that server. initialized to 0, increases
+	// monotonically
+	matchIndex map[string]int32
 
 	Role  string `yaml:"role"`
 	state state
@@ -125,8 +135,9 @@ type Raft struct {
 
 	electionTimeout time.Duration
 
-	voteGrantedChan          chan *api.VoteRequest
-	appendEntriesSuccessChan chan *api.AppendEntriesRequest
+	voteGrantedChan      chan *api.VoteRequest
+	validLeaderHeartbeat chan *api.AppendEntriesRequest
+	commitEntryChan      chan Log
 
 	options *Options
 }
@@ -166,6 +177,10 @@ func (r *Raft) Run(ctx context.Context) {
 
 	<-ctx.Done()
 
+	if err = os.Remove(r.options.configPath); err != nil {
+		log.Warn().Msg("unable to clean state file")
+	}
+
 	grpcServer.GracefulStop()
 	log.Warn().Msg("grpc server gracefully stopped")
 }
@@ -186,6 +201,9 @@ func (r Raft) GetLeaderAddr() (string, error) {
 }
 
 func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.VoteResponse, error) {
+	r.Lock()
+	defer r.Unlock()
+
 	log.Debug().
 		Int32("cTerm", req.Term).
 		Str("cId", req.CandidateId).
@@ -210,12 +228,18 @@ func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.Vote
 		}, nil
 	}
 
-	receiverLastLogIdx := int32(len(r.logs))
-	receiverLastLogTerm := int32(0)
+	lastIdx, _ := r.logStore.LastIndex()
 
-	if receiverLastLogIdx != 0 {
-		receiverLastLogTerm = r.logs[receiverLastLogIdx-1].Term
+	var lastLog Log
+	if lastIdx > 0 {
+		err := r.logStore.GetLog(lastIdx, &lastLog)
+		if err != nil {
+			return nil, err
+		}
 	}
+
+	receiverLastLogIdx := lastLog.Index
+	receiverLastLogTerm := lastLog.Term
 
 	if receiverLastLogTerm == req.LastLogTerm {
 		if req.LastLogIdx >= receiverLastLogIdx {
@@ -245,6 +269,18 @@ func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.Vote
 }
 
 func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest) (*api.AppendEntriesResponse, error) {
+	r.Lock()
+	defer r.Unlock()
+
+	log.Debug().
+		Int32("leaderTerm", req.Term).
+		Str("leaderId", req.LeaderId).
+		Int32("leaderPrevLogIdx", req.PrevLogIdx).
+		Int32("leaderPrevLogTerm", req.PrevLogTerm).
+		Int32("leaderCommit", req.LeaderCommitIdx).
+		Int("entriesLength", len(req.Entries)).
+		Msg("receive append entries")
+
 	// implementation 1
 	if req.Term < r.CurrentTerm {
 		return &api.AppendEntriesResponse{
@@ -253,12 +289,333 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 		}, nil
 	}
 
-	r.appendEntriesSuccessChan <- req
+	r.validLeaderHeartbeat <- req
+
+	lastIdx, _ := r.logStore.LastIndex()
+
+	if lastIdx == 0 { // follower has no log yet
+
+		// check if prev log is 0
+		if req.PrevLogIdx != 0 {
+			// if not, return false
+			// so that leader can retry until prevLogIdx = 0
+			log.Debug().Msg("follower is left behind. need leader to send older logs")
+			return &api.AppendEntriesResponse{
+				Term:    r.CurrentTerm,
+				Success: false,
+			}, nil
+		}
+	} else { // when follower already has log
+
+		var l Log
+		err := r.logStore.GetLog(req.PrevLogIdx, &l)
+
+		if err != nil && err != ErrLogNotFound {
+			return nil, err
+		}
+
+		// case 2
+		if err == ErrLogNotFound {
+			log.Debug().
+				Int32("leaderPrevLogIdx", req.PrevLogIdx).
+				Int32("leaderPrevLogTerm", req.PrevLogTerm).
+				Msg("prev log on the given index is not found")
+			// should return false so that leader can perform consistency check
+			return &api.AppendEntriesResponse{
+				Term:    r.CurrentTerm,
+				Success: false,
+			}, nil
+		}
+
+		// case 4
+		if l.Term != req.PrevLogTerm {
+			log.Debug().
+				Int32("prevLogTerm", l.Term).
+				Int32("leaderPrevLogTerm", req.PrevLogTerm).
+				Msg("prev log term doesnt match")
+			// should return false so that leader can perform consistency check
+
+			// delete the existing entry and all that follow it
+			lastIdx, _ := r.logStore.LastIndex()
+
+			err := r.logStore.DeleteRange(l.Index, lastIdx)
+			if err != nil {
+				log.Warn().Msg("unable to delete conflicted log")
+				return nil, err
+			}
+
+			return &api.AppendEntriesResponse{
+				Term:    r.CurrentTerm,
+				Success: false,
+			}, nil
+		}
+	}
+
+	// append new entry to its log
+	log.Debug().
+		Int("entriesLength", len(req.Entries)).
+		Msg("prepare committing entries to log storage")
+
+	var newLogs []Log
+	for _, entry := range req.Entries {
+
+		newLog := Log{
+			Index:   entry.Index,
+			Term:    entry.Term,
+			Command: entry.Command,
+		}
+		log.Debug().
+			Msgf("printing log %v", newLog)
+
+		newLogs = append(newLogs, newLog)
+	}
+
+	err := r.logStore.StoreLogs(newLogs)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(req.Entries) > 0 {
+		lastNewEntry := req.Entries[len(req.Entries)-1:][0]
+		if req.LeaderCommitIdx > r.commitIndex {
+			if req.LeaderCommitIdx > lastNewEntry.Index {
+				r.commitIndex = lastNewEntry.Index
+			} else {
+				r.commitIndex = req.LeaderCommitIdx
+			}
+		}
+	}
 
 	return &api.AppendEntriesResponse{
 		Term:    r.CurrentTerm,
 		Success: true,
 	}, nil
+}
+
+/*
+leader      idx		1
+leader 		term	1
+
+// true ==> follower is still empty
+follower    idx
+follower	term
+*/
+
+/*
+// idx 6 is the latest entry that leader want to append
+// prevLogIdx is 6
+
+leader      idx		1	2	3	4	5	6	7
+leader 		term	1	1	1	1	1	1	2
+
+// case 1
+// true ==> follower has log in prevLogIdx with correct term
+
+follower    idx		1	2	3	4	5	6
+follower    term	1	1	1	1	1	1
+
+// case 2
+// new log [7] prevLogIdx 6 // false ==> follower doesnt has log in prevLogIdx
+// new log [6, 7] prevLogIdx 5 // true
+follower    idx		1	2	3	4	5
+follower    term	1	1	1	1	1
+
+// case 3
+// false ==>  follower doesnt has log in prevLogIdx. its log is left behind several indices
+// leader should reduce follower next index on its state and send all entries
+// new log [5, 6, 7]
+follower    idx		1	2	3	4
+follower    term	1	1	1	1
+
+// case 4
+// false ==> conflict. follower should delete the existing entry and all that follow
+// leader should reduce follower next index on its state and send all entries from the next index
+follower    idx		1	2	3	4	5	6
+follower    term	1	1	1	1	1	2
+
+*/
+
+type ApplyFn func(ctx context.Context, command []byte) error
+
+func (r *Raft) CommitEntry(ctx context.Context, command []byte) error {
+
+	log.Debug().Msg("trying to commit entry")
+
+	lastPrevLogIdx, err := r.logStore.LastIndex()
+	if err != nil {
+		return err
+	}
+
+	newLog := Log{
+		Index:   lastPrevLogIdx + 1,
+		Term:    r.CurrentTerm,
+		Command: command,
+	}
+
+	log.Debug().
+		Int32("index", newLog.Index).
+		Int32("term", newLog.Term).
+		Str("command", string(newLog.Command)).
+		Msg("created new log entry")
+
+	// append to the log
+	err = r.logStore.StoreLog(newLog)
+	if err != nil {
+		return err
+	}
+
+	r.nextIndex[r.Id] = newLog.Index + 1
+	r.matchIndex[r.Id] = newLog.Index
+	r.commitIndex++
+
+	log.Debug().Msg("log is stored")
+
+	type appendEntriesRes struct {
+		server string
+		data   *api.AppendEntriesResponse
+	}
+	appendChan := make(chan appendEntriesRes, len(r.servers))
+
+	for _, server := range r.servers {
+		go func(server string) {
+			if server != r.Id {
+				rpc := RPC{}
+				log.Debug().Msgf("append new entries for %s", server)
+
+				for {
+
+					leaderLastLogIndex, _ := r.logStore.LastIndex()
+					followerNextIndex, _ := r.nextIndex[server]
+					if leaderLastLogIndex >= followerNextIndex {
+
+						// send append entries rpc with log entries
+						// starting at next index
+						logs, _ := r.logStore.GetRangeLog(followerNextIndex, leaderLastLogIndex)
+						var entries []*api.Log
+						for _, log := range logs {
+							entries = append(entries, &api.Log{
+								Term:    log.Term,
+								Index:   log.Index,
+								Command: log.Command,
+							})
+						}
+
+						lastPrevLogIdx := followerNextIndex - 1
+						if lastPrevLogIdx < 0 {
+							lastPrevLogIdx = 0
+						}
+
+						var lastPrevLog Log
+						err := r.logStore.GetLog(lastPrevLogIdx, &lastPrevLog)
+						if err != nil {
+							log.Warn().Msg("unable to get lastPrevLog")
+						}
+
+						log.Debug().
+							Int32("followerNextIndex", followerNextIndex).
+							Int32("leaderLastLogIndex", leaderLastLogIndex).
+							Int32("leaderLastPrevLogIndex", lastPrevLogIdx).
+							Int("entriesLength", len(entries)).
+							Msgf("trying to append entries to server %v", server)
+
+						res, err := rpc.AppendEntries(server, &api.AppendEntriesRequest{
+							Term:            r.CurrentTerm,
+							LeaderId:        r.Id,
+							PrevLogIdx:      lastPrevLog.Index,
+							PrevLogTerm:     lastPrevLog.Term,
+							LeaderCommitIdx: r.commitIndex,
+							Entries:         entries,
+						})
+						if err != nil {
+							// TODO if there is one or more follower error, retry indefinitely until all followers store all log entries
+							log.Error().Err(err).Msg("unable to call append entries")
+							continue
+						}
+
+						log.Info().
+							Bool("success", res.Success).
+							Int32("term", res.Term).
+							Str("server", server).
+							Msg("received append entry response")
+
+						// if successful, update nextIndex and matchIndex for follower
+						if res.Success {
+							r.nextIndex[server] = leaderLastLogIndex + 1
+							r.matchIndex[server] = leaderLastLogIndex
+
+							appendChan <- appendEntriesRes{
+								server: server,
+								data:   res,
+							}
+							break
+						}
+
+						r.nextIndex[server] -= 1
+						log.Warn().
+							Int32("nextIndex", r.nextIndex[server]).
+							Msgf("decrement server %v nextIndex", server)
+					}
+				}
+			}
+		}(server)
+	}
+
+	logCommittedChan := make(chan struct{})
+	commitFailedChan := make(chan error)
+
+	go func() {
+		replicationSuccessCount := 1 // leader has committed the changes
+		totalResponseReceived := 1
+		for {
+			select {
+			case res, _ := <-appendChan:
+
+				totalResponseReceived++
+				if res.data.Success {
+					replicationSuccessCount++
+				} else {
+					// TODO consistency check?
+					// if there is one or more follower error, retry indefinitely untill all followers store all log entries
+				}
+
+				log.Debug().
+					Str("server", res.server).
+					Msgf("checking nextIndex %v", r.nextIndex)
+				log.Debug().
+					Str("server", res.server).
+					Msgf("checking matchIndex %v", r.matchIndex)
+
+				if replicationSuccessCount > len(r.servers)/2 {
+					log.Info().Msg("entry is committed to majority of cluster")
+					logCommittedChan <- struct{}{}
+				}
+
+				if totalResponseReceived > len(r.servers)/2 &&
+					replicationSuccessCount < len(r.servers)/2 {
+					commitFailedChan <- fmt.Errorf("not committed to majority")
+				}
+			}
+		}
+	}()
+
+	select {
+	case <-logCommittedChan:
+		// TODO this still cant guarantee the ordering if there is concurrent request
+		return nil
+	case <-commitFailedChan:
+		return err
+	}
+
+	// err = fn(ctx, l.Command)
+	// if err != nil {
+	// 	return err
+	// }
+	//
+	// r.lastApplied = l.Index
+
+	// when returning to the api client, we need to ensure that they apply it in correct order
+	// that is why we need to get its callback so that we can call it from our controller goroutine and for select?
+	return nil
 }
 
 type state interface {

@@ -14,6 +14,8 @@ type LogStore interface {
 	FirstIndex() (int32, error)
 	LastIndex() (int32, error)
 	GetLog(idx int32, log *Log) error
+	// GetRangeLog return log starting from min index until max index
+	GetRangeLog(min, max int32) ([]Log, error)
 	StoreLog(log Log) error
 	StoreLogs(logs []Log) error
 	DeleteRange(minIdx, maxIdx int32) error

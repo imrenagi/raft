@@ -41,9 +41,22 @@ func (i *InMemoryStore) GetLog(idx int32, log *Log) error {
 	return nil
 }
 
-func (i *InMemoryStore) StoreLog(log Log) error {
+func (i *InMemoryStore) GetRangeLog(min, max int32) ([]Log, error) {
 	i.Lock()
 	defer i.Unlock()
+
+	var logs []Log
+	for j := min; j <= max; j++ {
+		val, ok := i.logs[j]
+		if !ok {
+			break
+		}
+		logs = append(logs, val)
+	}
+	return logs, nil
+}
+
+func (i *InMemoryStore) StoreLog(log Log) error {
 	return i.StoreLogs([]Log{log})
 }
 

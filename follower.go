@@ -34,12 +34,22 @@ func (f *follower) Run(ctx context.Context) {
 			if err := f.voteGranted(voteReq.CandidateId, voteReq.Term); err != nil {
 				log.Error().Err(err).Msg("unable to update state after vote is granted")
 			}
-		case s, _ := <-f.appendEntriesSuccessChan:
-			f.LeaderId = s.LeaderId // TODO(imre) change this later and its safe
-			if err := f.saveState(); err != nil {
-				// return
+		case s, _ := <-f.validLeaderHeartbeat:
+
+			if f.LeaderId != s.LeaderId {
+				f.LeaderId = s.LeaderId // TODO(imre) change this later and its safe
+				f.CurrentTerm = s.Term
+				if err := f.saveState(); err != nil {
+					// return
+				}
 			}
+
+			firstIdx, _ := f.logStore.FirstIndex()
+			newLastIdx, _ := f.logStore.LastIndex()
+
 			log.Debug().
+				Int32("firstIdx", firstIdx).
+				Int32("newLastIdx", newLastIdx).
 				Int32("CurrentTerm", f.CurrentTerm).
 				Msgf("follower is receiving append entries")
 		case <-ctx.Done():

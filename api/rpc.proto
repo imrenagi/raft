@@ -35,5 +35,9 @@ message AppendEntriesResponse {
   bool success = 2;
 }
 
-message Log {}
+message Log {
+  int32 term = 1;
+  int32 index = 2;
+  bytes command = 3;
+}
 
