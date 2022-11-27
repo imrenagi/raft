@@ -64,7 +64,9 @@ func New(opts ...Option) *Raft {
 	raft := &Raft{
 		Id:              fmt.Sprintf("%s:%s", "127.0.0.1", options.port),
 		electionTimeout: time.Duration(tms) * time.Millisecond,
-		logStore:        NewInMemoryLogStore(),
+		logStore: NewBoltLogStore(
+			WithPath(fmt.Sprintf("examples/shell_executor/tmp/%s.db", options.port)),
+		),
 		servers: []string{
 			"127.0.0.1:8001",
 			"127.0.0.1:8002",
@@ -177,9 +179,9 @@ func (r *Raft) Run(ctx context.Context) {
 
 	<-ctx.Done()
 
-	if err = os.Remove(r.options.configPath); err != nil {
-		log.Warn().Msg("unable to clean state file")
-	}
+	// if err = os.Remove(r.options.configPath); err != nil {
+	// 	log.Warn().Msg("unable to clean state file")
+	// }
 
 	grpcServer.GracefulStop()
 	log.Warn().Msg("grpc server gracefully stopped")
@@ -310,7 +312,18 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 		var l Log
 		err := r.logStore.GetLog(req.PrevLogIdx, &l)
 
+		log := log.With().
+			Uint64("leaderTerm", req.Term).
+			Str("leaderId", req.LeaderId).
+			Uint64("leaderPrevLogIdx", req.PrevLogIdx).
+			Uint64("leaderPrevLogTerm", req.PrevLogTerm).
+			Uint64("leaderCommit", req.LeaderCommitIdx).
+			Uint64("serverPrevLogIdx", l.Index).
+			Uint64("serverPrevLogTerm", l.Term).
+			Logger()
+
 		if err != nil && err != ErrLogNotFound {
+			log.Debug().Msg("prev log idx not found")
 			return nil, err
 		}
 
@@ -326,6 +339,8 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 				Success: false,
 			}, nil
 		}
+
+		log.Debug().Msg("checking last log term")
 
 		// case 4
 		if l.Term != req.PrevLogTerm {
@@ -468,7 +483,8 @@ func (r *Raft) CommitEntry(ctx context.Context, command []byte) error {
 	r.matchIndex[r.Id] = newLog.Index
 	r.commitIndex++
 
-	log.Debug().Msg("log is stored")
+	log.Debug().
+		Msgf("log is stored %v", newLog)
 
 	type appendEntriesRes struct {
 		server string
@@ -476,13 +492,23 @@ func (r *Raft) CommitEntry(ctx context.Context, command []byte) error {
 	}
 	appendChan := make(chan appendEntriesRes, len(r.servers))
 
+	logCommittedChan := make(chan struct{})
+	commitFailedChan := make(chan error)
+
 	for _, server := range r.servers {
 		go func(server string) {
 			if server != r.Id {
 				rpc := RPC{}
 				log.Debug().Msgf("append new entries for %s", server)
 
+				counter := 0
+
 				for {
+					if counter > 5 {
+						commitFailedChan <- fmt.Errorf("cant replicate")
+						return
+					}
+					counter++
 
 					leaderLastLogIndex, _ := r.logStore.LastIndex()
 					followerNextIndex, _ := r.nextIndex[server]
@@ -490,6 +516,7 @@ func (r *Raft) CommitEntry(ctx context.Context, command []byte) error {
 
 						// send append entries rpc with log entries
 						// starting at next index
+						// TODO change the use of range log into a single log sent sequentially
 						logs, _ := r.logStore.GetRangeLog(followerNextIndex, leaderLastLogIndex)
 						var entries []*api.Log
 						for _, log := range logs {
@@ -559,9 +586,6 @@ func (r *Raft) CommitEntry(ctx context.Context, command []byte) error {
 			}
 		}(server)
 	}
-
-	logCommittedChan := make(chan struct{})
-	commitFailedChan := make(chan error)
 
 	go func() {
 		replicationSuccessCount := 1 // leader has committed the changes
