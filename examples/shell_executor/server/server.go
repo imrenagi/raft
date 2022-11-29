@@ -31,15 +31,17 @@ type Server struct {
 
 func (s Server) Run(ctx context.Context) error {
 
+	replShell := &replicatedShell{
+		workDir: fmt.Sprintf("examples/shell_executor/out/%s", s.opts.Port),
+	}
+
 	r := raft.New(
+		replShell,
 		raft.WithServerPort(s.opts.RaftPort),
 		raft.WithServerConfig(fmt.Sprintf("examples/shell_executor/tmp/%s.yaml", s.opts.RaftPort)),
 	)
-	go r.Run(ctx)
 
-	shExec := shellExec{
-		workDir: fmt.Sprintf("examples/shell_executor/out/%s", s.opts.Port),
-	}
+	go r.Run(ctx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
@@ -50,14 +52,10 @@ func (s Server) Run(ctx context.Context) error {
 			return
 		}
 
-		log.Debug().Msgf("leader addr: %s", leader)
-
 		if r.Id != leader {
 			http.Error(w, "im no leader", http.StatusUnprocessableEntity)
 			return
 		}
-
-		log.Debug().Msgf("processing request because Im the leader")
 
 		b, err := io.ReadAll(req.Body)
 		if err != nil {
@@ -65,21 +63,18 @@ func (s Server) Run(ctx context.Context) error {
 			return
 		}
 
-		err = r.CommitEntry(ctx, b)
-		if err != nil {
+		res := r.Apply(ctx, b)
+		if res.Error() != nil {
 			http.Error(w, "cant commit", http.StatusUnprocessableEntity)
 			return
 		}
 
-		out, err := shExec.Apply(req.Context(), b)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("command execution error: %s", err), http.StatusUnprocessableEntity)
+		if s, ok := res.Response().([]byte); !ok {
+			http.Error(w, "cant cast state machine response", http.StatusInternalServerError)
 			return
+		} else {
+			w.Write(s)
 		}
-
-		// TODO (update lastapplied)
-
-		w.Write(out)
 	})
 	mux.HandleFunc("/leader", func(w http.ResponseWriter, req *http.Request) {
 		leader, err := r.GetLeaderAddr()
@@ -125,18 +120,16 @@ func (s Server) Run(ctx context.Context) error {
 	httpSrv.Shutdown(ctxShutDown)
 	log.Warn().Msg("shell server gracefully stopped")
 
-	shExec.CleanUp()
-
 	<-time.After(1 * time.Second)
 	return nil
 }
 
-type shellExec struct {
+type replicatedShell struct {
 	workDir string
 }
 
-func (s shellExec) Apply(ctx context.Context, command []byte) ([]byte, error) {
-	cmd := exec.Command("bash", "-c", string(command))
+func (s replicatedShell) Apply(log *raft.Log) (interface{}, error) {
+	cmd := exec.Command("bash", "-c", string(log.Command))
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Dir = s.workDir
@@ -145,8 +138,4 @@ func (s shellExec) Apply(ctx context.Context, command []byte) ([]byte, error) {
 		return nil, err
 	}
 	return out.Bytes(), nil
-}
-
-func (s shellExec) CleanUp() {
-	// os.RemoveAll(s.workDir)
 }

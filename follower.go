@@ -44,14 +44,6 @@ func (f *follower) Run(ctx context.Context) {
 				}
 			}
 
-			firstIdx, _ := f.logStore.FirstIndex()
-			newLastIdx, _ := f.logStore.LastIndex()
-
-			log.Debug().
-				Uint64("firstIdx", firstIdx).
-				Uint64("newLastIdx", newLastIdx).
-				Uint64("CurrentTerm", f.CurrentTerm).
-				Msgf("follower is receiving append entries")
 		case <-ctx.Done():
 			log.Info().Msg("context is done")
 			return
