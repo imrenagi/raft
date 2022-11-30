@@ -78,6 +78,7 @@ func New(fsm FSM, opts ...Option) *Raft {
 		validLeaderHeartbeat: make(chan *api.AppendEntriesRequest),
 		applyChan:            make(chan *logFuture, maxAppendEntries),
 		commitChan:           make(chan struct{}, maxAppendEntries),
+		fsmMutateChan:        make(chan interface{}, maxAppendEntries),
 		options:              options,
 		fsm:                  fsm,
 	}
@@ -125,7 +126,8 @@ type Raft struct {
 	commitIndex uint64
 	lastApplied uint64
 
-	fsm FSM
+	fsm           FSM
+	fsmMutateChan chan interface{}
 
 	Role  string `yaml:"role"`
 	state state
@@ -179,6 +181,8 @@ func (r *Raft) Run(ctx context.Context) {
 		}
 	}()
 
+	go r.runStateMachine()
+
 	<-ctx.Done()
 
 	if err = os.Remove(r.options.configPath); err != nil {
@@ -223,8 +227,96 @@ func (r Raft) getLastIndex() uint64 {
 	return lastIdx
 }
 
-func (r Raft) getCommitIndex() uint64 {
+func (r *Raft) getCommitIndex() uint64 {
 	return atomic.LoadUint64(&r.commitIndex)
+}
+
+func (r *Raft) setCommitIndex(idx uint64) {
+	atomic.StoreUint64(&r.commitIndex, idx)
+}
+
+func (r *Raft) getLastAppliedIndex() uint64 {
+	return atomic.LoadUint64(&r.lastApplied)
+}
+
+func (r *Raft) setLastAppliedIndex(idx uint64) {
+	atomic.StoreUint64(&r.lastApplied, idx)
+}
+
+func (r *Raft) runStateMachine() {
+	apply := func(future *logFuture) {
+		var err error
+		var res interface{}
+		defer func() {
+			if future != nil {
+				future.response = res
+				future.send(err)
+			}
+		}()
+		res, err = r.fsm.Apply(&future.log)
+	}
+
+	for {
+		select {
+		case data := <-r.fsmMutateChan:
+
+			switch d := data.(type) {
+			case []*logFuture:
+				for _, lf := range d {
+					apply(lf)
+				}
+			}
+		case <-r.shutdownChan:
+			return
+		}
+	}
+}
+
+func (r *Raft) processLogs(lastIndexToApply uint64, logs map[uint64]*logFuture) error {
+	lastAppliedIdx := r.getLastAppliedIndex()
+
+	log.Debug().
+		Uint64("lastAppliedIdx", lastAppliedIdx).
+		Uint64("lastIndexToApply", lastIndexToApply).
+		Msg("processing logs")
+
+	if lastAppliedIdx > lastIndexToApply {
+		return nil
+	}
+
+	applyBatch := func(logs []*logFuture) {
+		select {
+		case r.fsmMutateChan <- logs:
+		case <-r.shutdownChan:
+		}
+	}
+
+	var logsToApply []*logFuture
+	for idx := lastAppliedIdx + 1; idx <= lastIndexToApply; idx++ {
+		logF, ok := logs[idx]
+		if ok {
+			logsToApply = append(logsToApply, logF)
+		} else {
+			var logAtIdx Log
+			if err := r.logStore.GetLog(idx, &logAtIdx); err != nil {
+				return err
+			}
+			lf := &logFuture{
+				deferError: deferError{},
+				log:        logAtIdx,
+			}
+			lf.init()
+
+			logsToApply = append(logsToApply, lf)
+		}
+	}
+
+	log.Debug().Msgf("logs: %v", logsToApply)
+
+	applyBatch(logsToApply)
+
+	r.setLastAppliedIndex(lastIndexToApply)
+	return nil
 }
 
 func (r *Raft) dispatchLogs(applyLogs []*logFuture) error {
@@ -253,7 +345,6 @@ func (r *Raft) dispatchLogs(applyLogs []*logFuture) error {
 			lf.send(err)
 		}
 	}
-	// change commitIndex
 	r.leaderState.commitment.updateMatchIndex(r.Id, lastIndex)
 
 	for _, repl := range r.leaderState.replState {

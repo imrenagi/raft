@@ -71,9 +71,7 @@ func (c *commitment) updateMatchIndex(server string, matchIndex uint64) {
 			default:
 			}
 		}
-
 	}
-
 }
 
 type byUint64 []uint64
@@ -299,19 +297,33 @@ func (l *leader) Run(ctx context.Context) {
 			log.Debug().Msg("logs are committed. next is to apply the log")
 			// TODO apply the changes and increase the lastApplied index
 
-			// oldCommitIndex := l.getCommitIndex()
-			// l.leaderState.commitment.getCommitIndex()
+			commitIndex := l.leaderState.commitment.getCommitIndex()
+			l.setCommitIndex(commitIndex)
+
+			var lastIndexToApply uint64
+			logsToApply := make(map[uint64]*logFuture)
 
 			log.Debug().Msgf("existing length %d", len(l.leaderState.queue))
 			for _, item := range l.leaderState.queue {
-				log.Debug().Msg("sending completion to log future")
-				var err error
-				item.response, err = l.fsm.Apply(&item.log)
-				item.send(err)
+				idx := item.log.Index
+				if idx > commitIndex {
+					break
+				}
+
+				logsToApply[idx] = item
+				lastIndexToApply = idx
 			}
 
-			l.leaderState.queue = []*logFuture{}
-
+			log.Debug().Msgf("len of logs to apply %d", len(logsToApply))
+			if len(logsToApply) > 0 {
+				if err := l.processLogs(lastIndexToApply, logsToApply); err != nil {
+					log.Error().Err(err).Msg("unable to apply the logs")
+					continue
+				}
+				// remove applied logs
+				// TODO this is potential issue for race condition
+				l.leaderState.queue = []*logFuture{}
+			}
 		case <-ticker.C:
 			lastIdx, err := l.logStore.LastIndex()
 			if err != nil {
