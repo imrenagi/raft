@@ -185,12 +185,12 @@ func (r *Raft) Run(ctx context.Context) {
 
 	<-ctx.Done()
 
-	if err = os.Remove(r.options.configPath); err != nil {
-		log.Warn().Msg("unable to clean state file")
-	}
-
-	if err = os.Remove(fmt.Sprintf("examples/shell_executor/tmp/%s.db", r.options.port)); err != nil {
-	}
+	// if err = os.Remove(r.options.configPath); err != nil {
+	// 	log.Warn().Msg("unable to clean state file")
+	// }
+	//
+	// if err = os.Remove(fmt.Sprintf("examples/shell_executor/tmp/%s.db", r.options.port)); err != nil {
+	// }
 
 	grpcServer.GracefulStop()
 	log.Warn().Msg("grpc server gracefully stopped")
@@ -253,18 +253,20 @@ func (r *Raft) runStateMachine() {
 				future.send(err)
 			}
 		}()
+
 		res, err = r.fsm.Apply(&future.log)
+		log.Debug().Msgf("log idx %v term %v is applied", future.log.Index, future.log.Term)
 	}
 
 	for {
 		select {
 		case data := <-r.fsmMutateChan:
-
 			switch d := data.(type) {
 			case []*logFuture:
 				for _, lf := range d {
 					apply(lf)
 				}
+				log.Debug().Msgf("done applying %d logs", len(d))
 			}
 		case <-r.shutdownChan:
 			return
@@ -272,15 +274,17 @@ func (r *Raft) runStateMachine() {
 	}
 }
 
-func (r *Raft) processLogs(lastIndexToApply uint64, logs map[uint64]*logFuture) error {
-	lastAppliedIdx := r.getLastAppliedIndex()
+func (r *Raft) processLogs(index uint64, logs map[uint64]*logFuture) error {
+
+	// bug
+	lastApplied := r.getLastAppliedIndex()
 
 	log.Debug().
-		Uint64("lastAppliedIdx", lastAppliedIdx).
-		Uint64("lastIndexToApply", lastIndexToApply).
+		Uint64("lastAppliedIdx", lastApplied).
+		Uint64("lastIndexToApply", index).
 		Msg("processing logs")
 
-	if lastAppliedIdx > lastIndexToApply {
+	if lastApplied > index {
 		return nil
 	}
 
@@ -292,31 +296,49 @@ func (r *Raft) processLogs(lastIndexToApply uint64, logs map[uint64]*logFuture) 
 	}
 
 	var logsToApply []*logFuture
-	for idx := lastAppliedIdx + 1; idx <= lastIndexToApply; idx++ {
+
+	for idx := lastApplied + 1; idx <= index; idx++ {
+		var preparedLog *logFuture
 		logF, ok := logs[idx]
+
 		if ok {
-			logsToApply = append(logsToApply, logF)
+			preparedLog = r.prepareLog(logF)
 		} else {
 			var logAtIdx Log
 			if err := r.logStore.GetLog(idx, &logAtIdx); err != nil {
 				return err
 			}
-			lf := &logFuture{
-				deferError: deferError{},
-				log:        logAtIdx,
-			}
-			lf.init()
+			lf := newLogFuture(logAtIdx)
+			preparedLog = r.prepareLog(lf)
+		}
 
-			logsToApply = append(logsToApply, lf)
+		switch {
+		case preparedLog != nil:
+			log.Debug().Msg("appending log to the slice")
+			logsToApply = append(logsToApply, preparedLog)
+		case ok:
+			log.Debug().Msg("not log command. skip")
+			logF.send(nil)
 		}
 	}
 
 	log.Debug().Msgf("logs: %v", logsToApply)
 
-	applyBatch(logsToApply)
+	if len(logsToApply) > 0 {
+		applyBatch(logsToApply)
+	}
 
-	r.setLastAppliedIndex(lastIndexToApply)
+	r.setLastAppliedIndex(index)
 	return nil
+}
+
+func (r *Raft) prepareLog(future *logFuture) *logFuture {
+	switch future.log.Type {
+	case LogCommand:
+		return future
+	default:
+		return nil
+	}
 }
 
 func (r *Raft) dispatchLogs(applyLogs []*logFuture) error {

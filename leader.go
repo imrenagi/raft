@@ -124,7 +124,7 @@ func (l *leader) startReplication() {
 			followerReplication := &followerReplication{
 				server:      server,
 				stopChan:    make(chan struct{}, 1),
-				triggerChan: make(chan struct{}, 1),
+				triggerChan: make(chan struct{}, len(l.servers)),
 				nextIndex:   lastIndex + 1,
 				currentTerm: l.getCurrentTerm(),
 			}
@@ -140,8 +140,6 @@ func (l *leader) replicate(replication *followerReplication) {
 		case <-replication.stopChan:
 			return
 		case <-replication.triggerChan:
-			log.Debug().Msg("	receiving message from triggerChan")
-			// trigger replication
 			lastIndex := l.getLastIndex()
 			shouldStop := l.replicateTo(replication, lastIndex)
 			log.Debug().Msgf("done replicating to %s. shouldStop: %v", replication.server, shouldStop)
@@ -176,6 +174,7 @@ func (l *leader) replicateTo(s *followerReplication, lastLogIdx uint64) (shouldS
 	}
 
 	if res.Success {
+		log.Debug().Msg("appendEntry succeed")
 		if logs := req.Entries; len(logs) > 0 {
 			last := logs[len(logs)-1]
 			atomic.StoreUint64(&s.nextIndex, last.Index+1)
@@ -183,12 +182,13 @@ func (l *leader) replicateTo(s *followerReplication, lastLogIdx uint64) (shouldS
 		}
 	} else {
 		atomic.StoreUint64(&s.nextIndex, s.nextIndex-1)
+		log.Debug().Msgf("appendEntry failed: server %s nextIndex %d", s.server, s.nextIndex)
 	}
 
 	log.Debug().
 		Uint64("nextIndex", s.nextIndex).
 		Uint64("matchIndex", l.leaderState.commitment.matchIndexes[s.server]).
-		Msgf("replication succeed to %s", s.server)
+		Msgf("replication to %s success %v", s.server, res.Success)
 
 	return
 }
@@ -215,6 +215,7 @@ func (l *leader) setLogEntries(req *api.AppendEntriesRequest, nextIndex, lastLog
 			Term:    log.Term,
 			Index:   log.Index,
 			Command: log.Command,
+			Type:    log.Type.String(),
 		})
 	}
 	req.Entries = entries
@@ -261,7 +262,9 @@ func (l *leader) Run(ctx context.Context) {
 
 	go l.startReplication()
 
-	// TODO(imre) should send AppendEntriesRPC upon being elected. this is the no-op append entries
+	noop := &logFuture{log: Log{Type: LogNoOp}}
+	l.dispatchLogs([]*logFuture{noop})
+
 	// it should not wait for the ticker
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -273,7 +276,7 @@ func (l *leader) Run(ctx context.Context) {
 			return
 		case s, ok := <-l.validLeaderHeartbeat:
 			if ok {
-				l.CurrentTerm = s.Term // TODO(imre) change this later
+				l.CurrentTerm = s.Term // TODO (imre) change this later
 				l.LeaderId = s.LeaderId
 				l.changeState(newFollower(l.Raft))
 				return
@@ -282,6 +285,7 @@ func (l *leader) Run(ctx context.Context) {
 			ready := []*logFuture{newLog}
 		GroupCommitLog:
 			for i := 0; i <= maxAppendEntries; i++ {
+				log.Debug().Msgf("process more logs from applyChan")
 				select {
 				case log := <-l.applyChan:
 					ready = append(ready, log)
@@ -289,13 +293,13 @@ func (l *leader) Run(ctx context.Context) {
 					break GroupCommitLog
 				}
 			}
-			log.Debug().Msg("dispatching logs")
+			log.Debug().
+				Int("length", len(ready)).
+				Msg("dispatching logs")
 
 			l.dispatchLogs(ready)
 		case <-l.commitChan:
-
 			log.Debug().Msg("logs are committed. next is to apply the log")
-			// TODO apply the changes and increase the lastApplied index
 
 			commitIndex := l.leaderState.commitment.getCommitIndex()
 			l.setCommitIndex(commitIndex)
@@ -324,7 +328,7 @@ func (l *leader) Run(ctx context.Context) {
 				// TODO this is potential issue for race condition
 				l.leaderState.queue = []*logFuture{}
 			}
-		case <-ticker.C:
+		case <-ticker.C: // TODO this ticker is incorrect now. heartbeat should be performed only when no entries being appended
 			lastIdx, err := l.logStore.LastIndex()
 			if err != nil {
 				log.Error().Err(err).Msg("unable to get last index")
@@ -355,14 +359,6 @@ func (l *leader) Run(ctx context.Context) {
 							// log.Error().Err(err).Msg("unable to call append entries")
 							return
 						}
-
-						// TODO heartbeat can also do retry if res.Success is false
-
-						// log.Debug().
-						// 	Str("server", server).
-						// 	Uint64("CurrentTerm", l.CurrentTerm).
-						// 	Bool("success", res.Success).
-						// 	Msg("append entries is completed")
 					}
 				}(server)
 			}

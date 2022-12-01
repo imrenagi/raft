@@ -39,5 +39,6 @@ message Log {
   uint64 term = 1;
   uint64 index = 2;
   bytes command = 3;
+  string type = 4;
 }
 

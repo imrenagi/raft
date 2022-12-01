@@ -35,7 +35,6 @@ func (f *follower) Run(ctx context.Context) {
 				log.Error().Err(err).Msg("unable to update state after vote is granted")
 			}
 		case s, _ := <-f.validLeaderHeartbeat:
-
 			if f.LeaderId != s.LeaderId {
 				f.LeaderId = s.LeaderId // TODO(imre) change this later and its safe
 				f.CurrentTerm = s.Term
@@ -43,7 +42,6 @@ func (f *follower) Run(ctx context.Context) {
 					// return
 				}
 			}
-
 		case <-ctx.Done():
 			log.Info().Msg("context is done")
 			return

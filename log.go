@@ -2,7 +2,33 @@ package raft
 
 import "fmt"
 
+type LogType int
+
+func (lt LogType) String() string {
+	switch lt {
+	case LogNoOp:
+		return "LogNoOp"
+	default:
+		return "LogCommand"
+	}
+}
+
+func LogTypeFrom(s string) LogType {
+	switch s {
+	case "LogCommand":
+		return LogCommand
+	default:
+		return LogNoOp
+	}
+}
+
+const (
+	LogCommand LogType = iota
+	LogNoOp
+)
+
 type Log struct {
+	Type    LogType
 	Index   uint64
 	Term    uint64
 	Command []byte

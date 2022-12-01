@@ -24,6 +24,7 @@ type deferError struct {
 	err          error
 	errChan      chan error
 	ShutdownChan chan struct{}
+	responded    bool
 }
 
 func (d *deferError) init() {
@@ -47,12 +48,24 @@ func (d *deferError) Error() error {
 }
 
 func (d *deferError) send(err error) {
-	log.Debug().Msgf("deferError send %v", err)
 	if d.errChan == nil {
+		return
+	}
+	if d.responded { // so that we dont send message to closed channel
 		return
 	}
 	d.errChan <- err
 	close(d.errChan)
+	d.responded = true
+}
+
+func newLogFuture(l Log) *logFuture {
+	lf := &logFuture{
+		deferError: deferError{},
+		log:        l,
+	}
+	lf.init()
+	return lf
 }
 
 type logFuture struct {

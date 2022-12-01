@@ -12,6 +12,7 @@ func (r *Raft) Apply(ctx context.Context, cmd []byte) ApplyFuture {
 
 	logF := &logFuture{
 		log: Log{
+			Type:    LogCommand,
 			Command: cmd,
 		},
 	}
@@ -29,8 +30,10 @@ func (r *Raft) Apply(ctx context.Context, cmd []byte) ApplyFuture {
 }
 
 func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.VoteResponse, error) {
-	r.Lock()
-	defer r.Unlock()
+	res := &api.VoteResponse{
+		Term:        r.getCurrentTerm(),
+		VoteGranted: false,
+	}
 
 	log.Debug().
 		Uint64("cTerm", req.Term).
@@ -42,18 +45,12 @@ func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.Vote
 
 	if r.CurrentTerm > req.Term {
 		log.Debug().Msg("candidate is left behind")
-		return &api.VoteResponse{
-			Term:        r.CurrentTerm,
-			VoteGranted: false,
-		}, nil
+		return res, nil
 	}
 
 	if r.CurrentTerm == req.Term && r.VotedFor != "" && r.VotedFor != req.CandidateId {
 		log.Debug().Msg("vote for current term has been given to other candidate")
-		return &api.VoteResponse{
-			Term:        r.CurrentTerm,
-			VoteGranted: false,
-		}, nil
+		return res, nil
 	}
 
 	lastIdx, _ := r.logStore.LastIndex()
@@ -66,39 +63,31 @@ func (r *Raft) RequestVote(ctx context.Context, req *api.VoteRequest) (*api.Vote
 		}
 	}
 
-	receiverLastLogIdx := lastLog.Index
-	receiverLastLogTerm := lastLog.Term
-
-	if receiverLastLogTerm == req.LastLogTerm {
-		if req.LastLogIdx >= receiverLastLogIdx {
+	if lastLog.Term == req.LastLogTerm {
+		if req.LastLogIdx >= lastLog.Index {
 			log.Debug().Msg("candidate term is same and its log is longer or equal with receiver log")
 			r.voteGrantedChan <- req
-			return &api.VoteResponse{
-				Term:        r.CurrentTerm,
-				VoteGranted: true,
-			}, nil
+			res.VoteGranted = true
+			return res, nil
 		}
 	}
 
-	if req.LastLogTerm > receiverLastLogTerm {
+	if req.LastLogTerm > lastLog.Term {
 		log.Debug().Msg("candidate term is more up to date than the receiver term")
 		r.voteGrantedChan <- req
-		return &api.VoteResponse{
-			Term:        r.CurrentTerm,
-			VoteGranted: true,
-		}, nil
+		res.VoteGranted = true
+		return res, nil
 	}
 
 	log.Debug().Msg("vote is not granted. candidate doesn't satisfy any requirements to become leader")
-	return &api.VoteResponse{
-		Term:        r.CurrentTerm,
-		VoteGranted: false,
-	}, nil
+	return res, nil
 }
 
 func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest) (*api.AppendEntriesResponse, error) {
-	r.Lock()
-	defer r.Unlock()
+	res := &api.AppendEntriesResponse{
+		Term:    r.getCurrentTerm(),
+		Success: false,
+	}
 
 	log.Debug().
 		Uint64("leaderTerm", req.Term).
@@ -106,37 +95,26 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 		Uint64("leaderPrevLogIdx", req.PrevLogIdx).
 		Uint64("leaderPrevLogTerm", req.PrevLogTerm).
 		Uint64("leaderCommit", req.LeaderCommitIdx).
+		Uint64("serverTerm", r.getCurrentTerm()).
 		Int("entriesLength", len(req.Entries)).
 		Msg("receive append entries")
 
 	// implementation 1
 	if req.Term < r.CurrentTerm {
-		return &api.AppendEntriesResponse{
-			Term:    r.CurrentTerm,
-			Success: false,
-		}, nil
+		return res, nil
 	}
 
-	r.validLeaderHeartbeat <- req
+	r.validLeaderHeartbeat <- req // TODO remove this. I think we dont need this
 
-	lastIdx, _ := r.logStore.LastIndex()
+	lastIdx := r.getLastIndex()
 
-	if lastIdx == 0 { // follower has no log yet
-
-		// check if prev log is 0
+	if lastIdx == 0 {
 		if req.PrevLogIdx != 0 {
-			// if not, return false
-			// so that leader can retry until prevLogIdx = 0
 			log.Debug().Msg("follower is left behind. need leader to send older logs")
-			return &api.AppendEntriesResponse{
-				Term:    r.CurrentTerm,
-				Success: false,
-			}, nil
+			return res, nil
 		}
-	} else { // when follower already has log
-
-		var l Log
-		err := r.logStore.GetLog(req.PrevLogIdx, &l)
+	} else {
+		var prevLog Log
 
 		log := log.With().
 			Uint64("leaderTerm", req.Term).
@@ -144,71 +122,55 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 			Uint64("leaderPrevLogIdx", req.PrevLogIdx).
 			Uint64("leaderPrevLogTerm", req.PrevLogTerm).
 			Uint64("leaderCommit", req.LeaderCommitIdx).
-			Uint64("serverPrevLogIdx", l.Index).
-			Uint64("serverPrevLogTerm", l.Term).
+			Uint64("serverPrevLogIdx", prevLog.Index).
+			Uint64("serverPrevLogTerm", prevLog.Term).
 			Logger()
 
+		err := r.logStore.GetLog(req.PrevLogIdx, &prevLog)
 		if err != nil && err != ErrLogNotFound {
-			log.Debug().Msg("prev log idx not found")
+			log.Debug().Err(err).Msg("prev log idx not found")
 			return nil, err
 		}
 
-		// case 2
+		// prevLog not found. return false so that leader can perform consistency check
 		if err == ErrLogNotFound {
-			log.Debug().
-				Uint64("leaderPrevLogIdx", req.PrevLogIdx).
-				Uint64("leaderPrevLogTerm", req.PrevLogTerm).
-				Msg("prev log on the given index is not found")
-			// should return false so that leader can perform consistency check
-			return &api.AppendEntriesResponse{
-				Term:    r.CurrentTerm,
-				Success: false,
-			}, nil
+			log.Debug().Msg("prev log on the given index is not found")
+			return res, nil
 		}
 
 		log.Debug().Msg("checking last log term")
-
 		// case 4
-		if l.Term != req.PrevLogTerm {
-			log.Debug().
-				Uint64("prevLogTerm", l.Term).
-				Uint64("leaderPrevLogTerm", req.PrevLogTerm).
-				Msg("prev log term doesnt match")
-			// should return false so that leader can perform consistency check
-
+		if prevLog.Term != req.PrevLogTerm {
+			log.Debug().Msg("prev log term doesnt match with data sent by leader")
 			// delete the existing entry and all that follow it
-			lastIdx, _ := r.logStore.LastIndex()
-
-			err := r.logStore.DeleteRange(l.Index, lastIdx)
+			lastIdx := r.getLastIndex()
+			err := r.logStore.DeleteRange(prevLog.Index, lastIdx)
 			if err != nil {
 				log.Warn().Msg("unable to delete conflicted log")
 				return nil, err
 			}
-
-			return &api.AppendEntriesResponse{
-				Term:    r.CurrentTerm,
-				Success: false,
-			}, nil
+			return res, nil
 		}
 	}
 
-	// append new entry to its log
+	// append new entry to server log
 	log.Debug().
 		Int("entriesLength", len(req.Entries)).
 		Msg("prepare committing entries to log storage")
 
 	var newLogs []Log
-	for _, entry := range req.Entries {
+	logFutures := make(map[uint64]*logFuture)
 
+	for _, entry := range req.Entries {
 		newLog := Log{
 			Index:   entry.Index,
 			Term:    entry.Term,
 			Command: entry.Command,
+			Type:    LogTypeFrom(entry.Type),
 		}
-		log.Debug().
-			Msgf("printing log %v", newLog)
-
 		newLogs = append(newLogs, newLog)
+		logFutures[entry.Index] = newLogFuture(newLog)
+		log.Debug().Msgf("printing log %v", newLog)
 	}
 
 	err := r.logStore.StoreLogs(newLogs)
@@ -216,19 +178,25 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 		return nil, err
 	}
 
-	if len(req.Entries) > 0 {
-		lastNewEntry := req.Entries[len(req.Entries)-1:][0]
-		if req.LeaderCommitIdx > r.commitIndex {
-			if req.LeaderCommitIdx > lastNewEntry.Index {
-				r.commitIndex = lastNewEntry.Index
-			} else {
-				r.commitIndex = req.LeaderCommitIdx
-			}
-		}
+	lastIdx = r.getLastIndex()
+	if req.LeaderCommitIdx > 0 && req.LeaderCommitIdx > r.getCommitIndex() {
+		log.Debug().Msg("server committed the logs. processing for applying it further")
+		newCommitIndex := min(req.LeaderCommitIdx, lastIdx)
+		r.setCommitIndex(newCommitIndex)
+		r.processLogs(newCommitIndex, logFutures)
 	}
 
-	return &api.AppendEntriesResponse{
-		Term:    r.CurrentTerm,
-		Success: true,
-	}, nil
+	res.Success = true
+	log.Debug().
+		Int("entriesLength", len(req.Entries)).
+		Msgf("responding append entries term %d : %v", res.Term, res.Success)
+
+	return res, nil
+}
+
+func min(a, b uint64) uint64 {
+	if a > b {
+		return b
+	}
+	return a
 }
