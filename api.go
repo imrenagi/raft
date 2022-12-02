@@ -116,6 +116,12 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 	} else {
 		var prevLog Log
 
+		err := r.logStore.GetLog(req.PrevLogIdx, &prevLog)
+		if err != nil && err != ErrLogNotFound {
+			log.Debug().Err(err).Msg("prev log idx not found")
+			return nil, err
+		}
+
 		log := log.With().
 			Uint64("leaderTerm", req.Term).
 			Str("leaderId", req.LeaderId).
@@ -125,12 +131,6 @@ func (r *Raft) AppendEntries(ctx context.Context, req *api.AppendEntriesRequest)
 			Uint64("serverPrevLogIdx", prevLog.Index).
 			Uint64("serverPrevLogTerm", prevLog.Term).
 			Logger()
-
-		err := r.logStore.GetLog(req.PrevLogIdx, &prevLog)
-		if err != nil && err != ErrLogNotFound {
-			log.Debug().Err(err).Msg("prev log idx not found")
-			return nil, err
-		}
 
 		// prevLog not found. return false so that leader can perform consistency check
 		if err == ErrLogNotFound {

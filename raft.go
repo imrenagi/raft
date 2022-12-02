@@ -61,14 +61,17 @@ func New(fsm FSM, opts ...Option) *Raft {
 	}
 	defer f.Close()
 
+	bolt := NewBoltLogStore(
+		WithPath(fmt.Sprintf("examples/shell_executor/tmp/%s.db", options.port)),
+	)
+
 	rand.Seed(time.Now().UnixNano())
 	tms := rand.Intn(maxElectionTimeoutMs-minElectionTimeoutMs) + minElectionTimeoutMs
 	raft := &Raft{
 		Id:              fmt.Sprintf("%s:%s", "127.0.0.1", options.port),
 		electionTimeout: time.Duration(tms) * time.Millisecond,
-		logStore: NewBoltLogStore(
-			WithPath(fmt.Sprintf("examples/shell_executor/tmp/%s.db", options.port)),
-		),
+		logStore:        bolt,
+		configStore:     bolt,
 		servers: []string{
 			"127.0.0.1:8001",
 			"127.0.0.1:8002",
@@ -100,6 +103,23 @@ func New(fsm FSM, opts ...Option) *Raft {
 	}
 	raft.changeState(raftRole)
 
+	// load commit index
+	commitIndex, err := raft.configStore.GetUint64(commitIndexConfKey)
+	if err != nil && err != ErrConfigNotFound {
+		log.Fatal().Err(err).Msg("unable to load commit index")
+	}
+	raft.commitIndex = commitIndex
+
+	// load last applied index
+	lastAppliedIndex, err := raft.configStore.GetUint64(lastAppliedIndexConfKey)
+	if err != nil && err != ErrConfigNotFound {
+		log.Fatal().Err(err).Msg("unable to load last applied index")
+	}
+	raft.lastApplied = lastAppliedIndex
+
+	// TODO load current term
+	// TODO refactor this into a separate function
+
 	log.Debug().
 		Str("votedFor", raft.VotedFor).
 		Uint64("CurrentTerm", raft.CurrentTerm).
@@ -108,6 +128,12 @@ func New(fsm FSM, opts ...Option) *Raft {
 
 	return raft
 }
+
+var (
+	currentTermConfKey      = []byte("currentTerm")
+	commitIndexConfKey      = []byte("commitIndex")
+	lastAppliedIndexConfKey = []byte("lastAppliedIndex")
+)
 
 type Raft struct {
 	sync.Mutex
@@ -120,7 +146,8 @@ type Raft struct {
 	CurrentTerm uint64 `yaml:"term"`
 	VotedFor    string `yaml:"votedFor"`
 
-	logStore LogStore
+	logStore    LogStore
+	configStore ConfigStore
 
 	// volatile state on all servers
 	commitIndex uint64
@@ -221,6 +248,13 @@ func (r Raft) getCurrentTerm() uint64 {
 	return atomic.LoadUint64(&r.CurrentTerm)
 }
 
+func (r *Raft) setCurrentTerm(term uint64) {
+	if err := r.configStore.SetUint64(currentTermConfKey, term); err != nil {
+		log.Error().Err(err).Msg("failed updating the current term to config store")
+	}
+	atomic.StoreUint64(&r.CurrentTerm, term)
+}
+
 func (r Raft) getLastIndex() uint64 {
 	// TODO use cache instead
 	lastIdx, _ := r.logStore.LastIndex()
@@ -232,6 +266,9 @@ func (r *Raft) getCommitIndex() uint64 {
 }
 
 func (r *Raft) setCommitIndex(idx uint64) {
+	if err := r.configStore.SetUint64(commitIndexConfKey, idx); err != nil {
+		log.Error().Err(err).Msg("failed updating the commit index to config store")
+	}
 	atomic.StoreUint64(&r.commitIndex, idx)
 }
 
@@ -240,6 +277,9 @@ func (r *Raft) getLastAppliedIndex() uint64 {
 }
 
 func (r *Raft) setLastAppliedIndex(idx uint64) {
+	if err := r.configStore.SetUint64(lastAppliedIndexConfKey, idx); err != nil {
+		log.Error().Err(err).Msg("failed updating the last applied index to config store")
+	}
 	atomic.StoreUint64(&r.lastApplied, idx)
 }
 

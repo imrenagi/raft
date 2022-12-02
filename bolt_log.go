@@ -15,7 +15,8 @@ type BoltOptions struct {
 }
 
 var (
-	boltLogBucketName = []byte("logs")
+	logBucket    = []byte("logs")
+	configBucket = []byte("config")
 )
 
 type BoltOption func(options *BoltOptions)
@@ -63,7 +64,11 @@ func (b *Bolt) initialize() error {
 	}
 	defer tx.Rollback()
 
-	_, err = tx.CreateBucketIfNotExists(boltLogBucketName)
+	_, err = tx.CreateBucketIfNotExists(logBucket)
+	if err != nil {
+		return err
+	}
+	_, err = tx.CreateBucketIfNotExists(configBucket)
 	if err != nil {
 		return err
 	}
@@ -77,7 +82,7 @@ func (b *Bolt) FirstIndex() (uint64, error) {
 	}
 	defer tx.Rollback()
 
-	curs := tx.Bucket(boltLogBucketName).Cursor()
+	curs := tx.Bucket(logBucket).Cursor()
 	if k, _ := curs.First(); k == nil {
 		return 0, nil
 	} else {
@@ -92,7 +97,7 @@ func (b *Bolt) LastIndex() (uint64, error) {
 	}
 	defer tx.Rollback()
 
-	curs := tx.Bucket(boltLogBucketName).Cursor()
+	curs := tx.Bucket(logBucket).Cursor()
 	if k, _ := curs.Last(); k == nil {
 		return 0, nil
 	} else {
@@ -107,7 +112,7 @@ func (b *Bolt) GetLog(idx uint64, log *Log) error {
 	}
 	defer tx.Rollback()
 
-	lb := tx.Bucket(boltLogBucketName).Get(uint64ToBytes(idx))
+	lb := tx.Bucket(logBucket).Get(uint64ToBytes(idx))
 	if lb == nil {
 		return ErrLogNotFound
 	}
@@ -125,7 +130,7 @@ func (b *Bolt) GetRangeLog(minIdx, maxIdx uint64) ([]Log, error) {
 	}
 	defer tx.Rollback()
 
-	curs := tx.Bucket(boltLogBucketName).Cursor()
+	curs := tx.Bucket(logBucket).Cursor()
 	for k, val := curs.Seek(min); k != nil; k, val = curs.Next() {
 		if bytesToUint64(k) > maxIdx {
 			break
@@ -152,7 +157,7 @@ func (b *Bolt) StoreLogs(logs []Log) error {
 	defer tx.Rollback()
 
 	for _, l := range logs {
-		bucket := tx.Bucket(boltLogBucketName)
+		bucket := tx.Bucket(logBucket)
 		key := uint64ToBytes(l.Index)
 		val, err := encodeMsgPack(l)
 		if err != nil {
@@ -174,7 +179,7 @@ func (b *Bolt) DeleteRange(minIdx, maxIdx uint64) error {
 	}
 	defer tx.Rollback()
 
-	curs := tx.Bucket(boltLogBucketName).Cursor()
+	curs := tx.Bucket(logBucket).Cursor()
 	for k, _ := curs.Seek(min); k != nil; k, _ = curs.Next() {
 		if bytesToUint64(k) > maxIdx {
 			break
@@ -185,6 +190,47 @@ func (b *Bolt) DeleteRange(minIdx, maxIdx uint64) error {
 		}
 	}
 	return tx.Commit()
+}
+
+func (b *Bolt) Get(key []byte) ([]byte, error) {
+	tx, err := b.conn.Begin(false)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	lb := tx.Bucket(configBucket).Get(key)
+	if lb == nil {
+		return nil, ErrConfigNotFound
+	}
+	return lb, nil
+}
+
+func (b *Bolt) Set(key, val []byte) error {
+	tx, err := b.conn.Begin(true)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	err = tx.Bucket(configBucket).Put(key, val)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (b *Bolt) GetUint64(key []byte) (uint64, error) {
+	val, err := b.Get(key)
+	if err != nil {
+		return 0, err
+	}
+	return bytesToUint64(val), nil
+}
+
+func (b *Bolt) SetUint64(key []byte, val uint64) error {
+	vb := uint64ToBytes(val)
+	return b.Set(key, vb)
 }
 
 func bytesToUint64(b []byte) uint64 {

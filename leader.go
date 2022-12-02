@@ -87,6 +87,7 @@ func newCommitment(commitChan chan struct{}, servers []string, startIndex uint64
 		commitChan:   commitChan,
 	}
 
+	// TODO after restart, this match index becomes zero
 	for _, server := range servers {
 		c.matchIndexes[server] = 0
 	}

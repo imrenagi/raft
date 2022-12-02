@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
+	"math/rand"
 	"net/http"
 	"os/exec"
 	"time"
@@ -57,15 +57,18 @@ func (s Server) Run(ctx context.Context) error {
 			return
 		}
 
-		b, err := io.ReadAll(req.Body)
-		if err != nil {
-			http.Error(w, "invalid body", http.StatusBadRequest)
-			return
-		}
+		// b, err := io.ReadAll(req.Body)
+		// if err != nil {
+		// 	http.Error(w, "invalid body", http.StatusBadRequest)
+		// 	return
+		// }
 
-		res := r.Apply(ctx, b)
+		rn := rand.Intn(1000)
+		buf := bytes.NewBufferString(fmt.Sprintf("echo %d >> test.txt", rn))
+
+		res := r.Apply(ctx, buf.Bytes())
 		if res.Error() != nil {
-			http.Error(w, "cant commit", http.StatusUnprocessableEntity)
+			http.Error(w, fmt.Sprintf("cant commit %v", res.Error()), http.StatusUnprocessableEntity)
 			return
 		}
 
