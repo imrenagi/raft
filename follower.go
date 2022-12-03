@@ -21,9 +21,6 @@ type follower struct {
 }
 
 func (f *follower) Run(ctx context.Context) {
-	log.Debug().
-		Uint64("CurrentTerm", f.CurrentTerm).
-		Msg("follower run")
 	for {
 		select {
 		case <-time.After(f.electionTimeout):

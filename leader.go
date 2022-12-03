@@ -60,10 +60,6 @@ func (c *commitment) updateMatchIndex(server string, matchIndex uint64) {
 		}
 		sort.Sort(byUint64(matches))
 		quorumIndex := matches[(len(matches)-1)/2]
-		log.Debug().
-			Uint64("commitIndex", c.commitIndex).
-			Uint64("quorumIndex", quorumIndex).
-			Msgf("curr match index %v", matches)
 		if quorumIndex > c.commitIndex {
 			c.commitIndex = quorumIndex
 			select {
@@ -121,7 +117,6 @@ func (l *leader) startReplication() {
 			continue
 		}
 		if _, ok := l.leaderState.replState[server]; !ok {
-			log.Debug().Msgf("preparing follower replication for %v", server)
 			followerReplication := &followerReplication{
 				server:      server,
 				stopChan:    make(chan struct{}, 1),
@@ -136,17 +131,17 @@ func (l *leader) startReplication() {
 }
 
 func (l *leader) replicate(replication *followerReplication) {
-	for {
+	var shouldStop bool
+	for !shouldStop {
 		select {
 		case <-replication.stopChan:
 			return
+		case <-time.After(l.heartbeatTimeout):
+			lastIndex := l.getLastIndex()
+			shouldStop = l.replicateTo(replication, lastIndex)
 		case <-replication.triggerChan:
 			lastIndex := l.getLastIndex()
-			shouldStop := l.replicateTo(replication, lastIndex)
-			log.Debug().Msgf("done replicating to %s. shouldStop: %v", replication.server, shouldStop)
-			if shouldStop {
-				return
-			}
+			shouldStop = l.replicateTo(replication, lastIndex)
 		}
 	}
 }
@@ -175,7 +170,6 @@ func (l *leader) replicateTo(s *followerReplication, lastLogIdx uint64) (shouldS
 	}
 
 	if res.Success {
-		log.Debug().Msg("appendEntry succeed")
 		if logs := req.Entries; len(logs) > 0 {
 			last := logs[len(logs)-1]
 			atomic.StoreUint64(&s.nextIndex, last.Index+1)
@@ -183,14 +177,7 @@ func (l *leader) replicateTo(s *followerReplication, lastLogIdx uint64) (shouldS
 		}
 	} else {
 		atomic.StoreUint64(&s.nextIndex, s.nextIndex-1)
-		log.Debug().Msgf("appendEntry failed: server %s nextIndex %d", s.server, s.nextIndex)
 	}
-
-	log.Debug().
-		Uint64("nextIndex", s.nextIndex).
-		Uint64("matchIndex", l.leaderState.commitment.matchIndexes[s.server]).
-		Msgf("replication to %s success %v", s.server, res.Success)
-
 	return
 }
 
@@ -266,10 +253,6 @@ func (l *leader) Run(ctx context.Context) {
 	noop := &logFuture{log: Log{Type: LogNoOp}}
 	l.dispatchLogs([]*logFuture{noop})
 
-	// it should not wait for the ticker
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -286,35 +269,27 @@ func (l *leader) Run(ctx context.Context) {
 			ready := []*logFuture{newLog}
 		GroupCommitLog:
 			for i := 0; i <= maxAppendEntries; i++ {
-				log.Debug().Msgf("process more logs from applyChan")
 				select {
-				case log := <-l.applyChan:
-					ready = append(ready, log)
+				case nl := <-l.applyChan:
+					log.Warn().Msg("more request on applychan")
+					ready = append(ready, nl)
 				default:
 					break GroupCommitLog
 				}
 			}
-			log.Debug().
-				Int("length", len(ready)).
-				Msg("dispatching logs")
-
 			l.dispatchLogs(ready)
 		case <-l.commitChan:
-			log.Debug().Msg("logs are committed. next is to apply the log")
-
 			commitIndex := l.leaderState.commitment.getCommitIndex()
 			l.setCommitIndex(commitIndex)
 
 			var lastIndexToApply uint64
 			logsToApply := make(map[uint64]*logFuture)
 
-			log.Debug().Msgf("existing length %d", len(l.leaderState.queue))
 			for _, item := range l.leaderState.queue {
 				idx := item.log.Index
 				if idx > commitIndex {
 					break
 				}
-
 				logsToApply[idx] = item
 				lastIndexToApply = idx
 			}
@@ -322,46 +297,11 @@ func (l *leader) Run(ctx context.Context) {
 			log.Debug().Msgf("len of logs to apply %d", len(logsToApply))
 			if len(logsToApply) > 0 {
 				if err := l.processLogs(lastIndexToApply, logsToApply); err != nil {
-					log.Error().Err(err).Msg("unable to apply the logs")
 					continue
 				}
 				// remove applied logs
 				// TODO this is potential issue for race condition
 				l.leaderState.queue = []*logFuture{}
-			}
-		case <-ticker.C: // TODO this ticker is incorrect now. heartbeat should be performed only when no entries being appended
-			lastIdx, err := l.logStore.LastIndex()
-			if err != nil {
-				log.Error().Err(err).Msg("unable to get last index")
-			}
-
-			var lastPrevLog Log
-			if lastIdx != 0 {
-				err := l.logStore.GetLog(lastIdx, &lastPrevLog)
-				if err != nil {
-					log.Error().Err(err).Msg("unable to get last log")
-				}
-			}
-
-			for _, server := range l.servers {
-				go func(server string) {
-					if server != l.Id {
-
-						rpc := RPC{}
-						_, err := rpc.AppendEntries(server, &api.AppendEntriesRequest{
-							Term:            l.CurrentTerm,
-							LeaderId:        l.Id,
-							PrevLogIdx:      lastPrevLog.Index,
-							PrevLogTerm:     lastPrevLog.Term,
-							LeaderCommitIdx: l.commitIndex,
-							Entries:         nil, // heartbeat is expected to sent empty log
-						})
-						if err != nil {
-							// log.Error().Err(err).Msg("unable to call append entries")
-							return
-						}
-					}
-				}(server)
 			}
 		}
 	}

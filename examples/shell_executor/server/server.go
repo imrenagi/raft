@@ -131,8 +131,9 @@ type replicatedShell struct {
 	workDir string
 }
 
-func (s replicatedShell) Apply(log *raft.Log) (interface{}, error) {
-	cmd := exec.Command("bash", "-c", string(log.Command))
+func (s replicatedShell) Apply(l *raft.Log) (interface{}, error) {
+	log.Info().Msgf("applying log idx %d to fsm %s", l.Index, string(l.Command))
+	cmd := exec.Command("bash", "-c", string(l.Command))
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Dir = s.workDir

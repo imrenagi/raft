@@ -20,6 +20,7 @@ import (
 const (
 	minElectionTimeoutMs int = 5000  // 150
 	maxElectionTimeoutMs int = 10000 // 300
+	heartbeatTimeoutMs   int = 2500
 	maxAppendEntries     int = 128
 )
 
@@ -68,10 +69,11 @@ func New(fsm FSM, opts ...Option) *Raft {
 	rand.Seed(time.Now().UnixNano())
 	tms := rand.Intn(maxElectionTimeoutMs-minElectionTimeoutMs) + minElectionTimeoutMs
 	raft := &Raft{
-		Id:              fmt.Sprintf("%s:%s", "127.0.0.1", options.port),
-		electionTimeout: time.Duration(tms) * time.Millisecond,
-		logStore:        bolt,
-		configStore:     bolt,
+		Id:               fmt.Sprintf("%s:%s", "127.0.0.1", options.port),
+		electionTimeout:  time.Duration(tms) * time.Millisecond,
+		heartbeatTimeout: time.Duration(heartbeatTimeoutMs) * time.Millisecond,
+		logStore:         bolt,
+		configStore:      bolt,
 		servers: []string{
 			"127.0.0.1:8001",
 			"127.0.0.1:8002",
@@ -161,7 +163,8 @@ type Raft struct {
 
 	servers []string
 
-	electionTimeout time.Duration
+	electionTimeout  time.Duration
+	heartbeatTimeout time.Duration
 
 	voteGrantedChan      chan *api.VoteRequest
 	validLeaderHeartbeat chan *api.AppendEntriesRequest
@@ -224,8 +227,6 @@ func (r *Raft) Run(ctx context.Context) {
 }
 
 func (r Raft) GetLeaderAddr() (string, error) {
-	fmt.Println("leader id", r.LeaderId)
-
 	if r.LeaderId == "" {
 		return "", fmt.Errorf("no elected leader")
 	}
@@ -295,7 +296,9 @@ func (r *Raft) runStateMachine() {
 		}()
 
 		res, err = r.fsm.Apply(&future.log)
-		log.Debug().Msgf("log idx %v term %v is applied", future.log.Index, future.log.Term)
+		log.Debug().
+			Interface("err", err).
+			Msgf("log idx %v term %v command %s is applied", future.log.Index, future.log.Term, string(future.log.Command))
 	}
 
 	for {
@@ -306,7 +309,6 @@ func (r *Raft) runStateMachine() {
 				for _, lf := range d {
 					apply(lf)
 				}
-				log.Debug().Msgf("done applying %d logs", len(d))
 			}
 		case <-r.shutdownChan:
 			return
@@ -354,15 +356,11 @@ func (r *Raft) processLogs(index uint64, logs map[uint64]*logFuture) error {
 
 		switch {
 		case preparedLog != nil:
-			log.Debug().Msg("appending log to the slice")
 			logsToApply = append(logsToApply, preparedLog)
 		case ok:
-			log.Debug().Msg("not log command. skip")
 			logF.send(nil)
 		}
 	}
-
-	log.Debug().Msgf("logs: %v", logsToApply)
 
 	if len(logsToApply) > 0 {
 		applyBatch(logsToApply)
@@ -400,7 +398,6 @@ func (r *Raft) dispatchLogs(applyLogs []*logFuture) error {
 		r.leaderState.queue = append(r.leaderState.queue, nl)
 	}
 
-	log.Debug().Msgf("storing %d logs to disk", len(logs))
 	if err := r.logStore.StoreLogs(logs); err != nil {
 		log.Error().Err(err).Msg("error while storing logs to disk")
 		for _, lf := range applyLogs {

@@ -34,6 +34,10 @@ type Log struct {
 	Command []byte
 }
 
+func (l Log) String() string {
+	return fmt.Sprintf("type: %d, index: %d, term: %d, command: %s", l.Type, l.Index, l.Term, string(l.Command))
+}
+
 // LogStore is log storage interface used for retrieving and
 // managing logs
 type LogStore interface {
