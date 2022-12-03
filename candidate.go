@@ -28,12 +28,30 @@ func (c *candidate) Run(ctx context.Context) {
 	c.CurrentTerm++ // increment current term
 
 	log.Debug().
-		Int32("CurrentTerm", c.CurrentTerm).
+		Uint64("CurrentTerm", c.CurrentTerm).
 		Msg("candidate run")
 
 	// vote itself
 	// send request vote RPC to other ServerAddr
 	voteResponseChan := make(chan *api.VoteResponse, len(c.servers))
+
+	lastIdx, err := c.logStore.LastIndex()
+	if err != nil {
+		log.Error().Err(err).
+			Msg("unable to get last index")
+		return
+	}
+
+	var lastPrevLog Log
+	if lastIdx != 0 {
+		err := c.logStore.GetLog(lastIdx, &lastPrevLog)
+		if err != nil {
+			log.Error().Err(err).
+				Msg("unable to get last index")
+			return
+		}
+	}
+
 	for _, server := range c.servers {
 		go func(server string) {
 			if c.Id != server {
@@ -45,8 +63,8 @@ func (c *candidate) Run(ctx context.Context) {
 				res, err := rpc.RequestVote(server, &api.VoteRequest{
 					Term:        c.CurrentTerm,
 					CandidateId: c.Id,
-					LastLogIdx:  0,
-					LastLogTerm: 0,
+					LastLogIdx:  lastPrevLog.Index,
+					LastLogTerm: lastPrevLog.Term,
 				})
 				if err != nil {
 					log.Error().Err(err).Msg("fail to request for vote")
@@ -80,7 +98,7 @@ func (c *candidate) Run(ctx context.Context) {
 			if err := c.voteGranted(voteReq.CandidateId, voteReq.Term); err != nil {
 				log.Error().Err(err).Msg("unable to update state after vote is granted")
 			}
-		case s, ok := <-c.appendEntriesSuccessChan:
+		case s, ok := <-c.validLeaderHeartbeat:
 			if ok {
 				c.CurrentTerm = s.Term // TODO(imre) change this later
 				c.LeaderId = s.LeaderId

@@ -19,7 +19,7 @@ static_resources:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
                 route_config:
                   virtual_hosts:
-                    - name: direct_response_service
+                    - name: raft
                       domains: ["*"]
                       routes:
                         - match:
@@ -28,19 +28,16 @@ static_resources:
                             cluster: tcp_cluster
   clusters:
     - name: tcp_cluster
-      connect_timeout: 5s
-      lb_policy: MAGLEV
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
       health_checks:
         - timeout: 3s
-          interval: 5s
+          interval: 3s
           interval_jitter: 1s
-          unhealthy_threshold: 3
-          healthy_threshold: 3
+          unhealthy_threshold: 2
+          healthy_threshold: 1
           http_health_check:
             path: "/leader"
-      common_lb_config:
-        healthy_panic_threshold:
-          value: 0.0
       load_assignment:
         cluster_name: tcp_cluster
         endpoints:
@@ -49,16 +46,16 @@ static_resources:
                   health_check_config:
                     port_value: 9001
                   address:
-                    socket_address: { address: 127.0.0.1, port_value: 9001 }
+                    socket_address: { address: 0.0.0.0, port_value: 9001 }
           - lb_endpoints:
               - endpoint:
                   health_check_config:
                     port_value: 9002
                   address:
-                    socket_address: { address: 127.0.0.1, port_value: 9002 }
+                    socket_address: { address: 0.0.0.0, port_value: 9002 }
           - lb_endpoints:
               - endpoint:
                   health_check_config:
                     port_value: 9003
                   address:
-                    socket_address: { address: 127.0.0.1, port_value: 9003 }
+                    socket_address: { address: 0.0.0.0, port_value: 9003 }

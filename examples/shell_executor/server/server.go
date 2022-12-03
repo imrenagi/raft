@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
+	"math/rand"
 	"net/http"
 	"os/exec"
 	"time"
@@ -31,15 +31,17 @@ type Server struct {
 
 func (s Server) Run(ctx context.Context) error {
 
+	replShell := &replicatedShell{
+		workDir: fmt.Sprintf("examples/shell_executor/out/%s", s.opts.Port),
+	}
+
 	r := raft.New(
+		replShell,
 		raft.WithServerPort(s.opts.RaftPort),
 		raft.WithServerConfig(fmt.Sprintf("examples/shell_executor/tmp/%s.yaml", s.opts.RaftPort)),
 	)
-	go r.Run(ctx)
 
-	shExec := shellExec{
-		workDir: fmt.Sprintf("examples/shell_executor/out/%s", s.opts.Port),
-	}
+	go r.Run(ctx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
@@ -50,29 +52,32 @@ func (s Server) Run(ctx context.Context) error {
 			return
 		}
 
-		log.Debug().Msgf("leader addr: %s", leader)
-
 		if r.Id != leader {
 			http.Error(w, "im no leader", http.StatusUnprocessableEntity)
 			return
 		}
 
-		log.Debug().Msgf("processing request because Im the leader")
+		// b, err := io.ReadAll(req.Body)
+		// if err != nil {
+		// 	http.Error(w, "invalid body", http.StatusBadRequest)
+		// 	return
+		// }
 
-		b, err := io.ReadAll(req.Body)
-		if err != nil {
-			http.Error(w, "invalid body", http.StatusBadRequest)
+		rn := rand.Intn(1000)
+		buf := bytes.NewBufferString(fmt.Sprintf("echo %d >> test.txt", rn))
+
+		res := r.Apply(ctx, buf.Bytes())
+		if res.Error() != nil {
+			http.Error(w, fmt.Sprintf("cant commit %v", res.Error()), http.StatusUnprocessableEntity)
 			return
 		}
 
-		command := string(b)
-		out, err := shExec.Apply(req.Context(), command)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("command execution error: %s", err), http.StatusUnprocessableEntity)
+		if s, ok := res.Response().([]byte); !ok {
+			http.Error(w, "cant cast state machine response", http.StatusInternalServerError)
 			return
+		} else {
+			w.Write(s)
 		}
-
-		w.Write(out)
 	})
 	mux.HandleFunc("/leader", func(w http.ResponseWriter, req *http.Request) {
 		leader, err := r.GetLeaderAddr()
@@ -122,12 +127,13 @@ func (s Server) Run(ctx context.Context) error {
 	return nil
 }
 
-type shellExec struct {
+type replicatedShell struct {
 	workDir string
 }
 
-func (s shellExec) Apply(ctx context.Context, command string) ([]byte, error) {
-	cmd := exec.Command("bash", "-c", command)
+func (s replicatedShell) Apply(l *raft.Log) (interface{}, error) {
+	log.Info().Msgf("applying log idx %d to fsm %s", l.Index, string(l.Command))
+	cmd := exec.Command("bash", "-c", string(l.Command))
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Dir = s.workDir

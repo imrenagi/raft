@@ -21,9 +21,6 @@ type follower struct {
 }
 
 func (f *follower) Run(ctx context.Context) {
-	log.Debug().
-		Int32("CurrentTerm", f.CurrentTerm).
-		Msg("follower run")
 	for {
 		select {
 		case <-time.After(f.electionTimeout):
@@ -34,14 +31,14 @@ func (f *follower) Run(ctx context.Context) {
 			if err := f.voteGranted(voteReq.CandidateId, voteReq.Term); err != nil {
 				log.Error().Err(err).Msg("unable to update state after vote is granted")
 			}
-		case s, _ := <-f.appendEntriesSuccessChan:
-			f.LeaderId = s.LeaderId // TODO(imre) change this later and its safe
-			if err := f.saveState(); err != nil {
-				// return
+		case s, _ := <-f.validLeaderHeartbeat:
+			if f.LeaderId != s.LeaderId {
+				f.LeaderId = s.LeaderId // TODO(imre) change this later and its safe
+				f.CurrentTerm = s.Term
+				if err := f.saveState(); err != nil {
+					// return
+				}
 			}
-			log.Debug().
-				Int32("CurrentTerm", f.CurrentTerm).
-				Msgf("follower is receiving append entries")
 		case <-ctx.Done():
 			log.Info().Msg("context is done")
 			return

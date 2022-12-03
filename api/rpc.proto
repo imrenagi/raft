@@ -10,30 +10,35 @@ service Raft {
 }
 
 message VoteRequest {
-  int32 term = 1;
+  uint64 term = 1;
   string candidate_id = 2;
-  int32 last_log_idx = 3;
-  int32 last_log_term = 4;
+  uint64 last_log_idx = 3;
+  uint64 last_log_term = 4;
 }
 
 message VoteResponse {
-  int32 term = 1;
+  uint64 term = 1;
   bool vote_granted = 2;
 }
 
 message AppendEntriesRequest {
-  int32 term = 1;
+  uint64 term = 1;
   string leader_id = 2;
-  int32 prev_log_idx = 3;
-  int32 prev_log_term = 4;
-  int32 leader_commit_idx = 5;
+  uint64 prev_log_idx = 3;
+  uint64 prev_log_term = 4;
+  uint64 leader_commit_idx = 5;
   repeated Log entries = 6;
 }
 
 message AppendEntriesResponse {
-  int32 term = 1;
+  uint64 term = 1;
   bool success = 2;
 }
 
-message Log {}
+message Log {
+  uint64 term = 1;
+  uint64 index = 2;
+  bytes command = 3;
+  string type = 4;
+}
 
